@@ -1,0 +1,4 @@
+gdal>=3.12.4
+numpy>=2.4.3
+scipy>=1.18.0
+requests>=2.34.2
