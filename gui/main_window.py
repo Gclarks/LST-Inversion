@@ -140,6 +140,10 @@ class MainWindow(tk.Tk):
 
         # ── 逐像元模式 ──
         self._wv_raster_frame = ttk.Frame(main)
+        # 初始占位但隐藏，和 mean_frame 同列同位置
+        self._wv_raster_frame.grid(row=row-1, column=0, columnspan=3,
+                                    sticky='ew', pady=(0, 6))
+        self._wv_raster_frame.grid_remove()
         ttk.Label(self._wv_raster_frame, text='MODIS产品:').pack(side=tk.LEFT)
         self._wv_raster_var = tk.StringVar()
         self._wv_raster_entry = ttk.Entry(
@@ -253,14 +257,10 @@ class MainWindow(tk.Tk):
         CacheDialog(self)
 
     def _toggle_wv_mode(self):
-        """切换水汽模式显示。"""
+        """切换水汽模式显示。两帧预置在相同位置，只切换可见性。"""
         if self._wv_mode.get() == 'raster':
             self._wv_mean_frame.grid_remove()
-            # 放到和 mean_frame 相同的位置
-            self._wv_raster_frame.grid(
-                row=7, column=0, columnspan=3, sticky='ew', pady=(0, 6),
-            )
-            self._wv_raster_var.set('')
+            self._wv_raster_frame.grid()
         else:
             self._wv_raster_frame.grid_remove()
             self._wv_mean_frame.grid()
