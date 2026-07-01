@@ -103,23 +103,54 @@ class MainWindow(tk.Tk):
                                           variable=self._unit_var, value=CELSIUS)
         self._unit_rb_c.pack(side=tk.LEFT, padx=(4, 0))
 
-        # ── 水汽含量 ──
-        wv_frame = ttk.Frame(main)
-        wv_frame.grid(row=row, column=0, columnspan=3, sticky='ew', pady=(0, 6)); row += 1
-        ttk.Label(wv_frame, text='水汽含量:').pack(side=tk.LEFT)
+        # ── 水汽模式选择 ──
+        mode_frame = ttk.Frame(main)
+        mode_frame.grid(row=row, column=0, columnspan=3,
+                        sticky='ew', pady=(0, 4)); row += 1
+        ttk.Label(mode_frame, text='水汽模式:').pack(side=tk.LEFT)
+        self._wv_mode = tk.StringVar(value='mean')
+        ttk.Radiobutton(mode_frame, text='平均值', variable=self._wv_mode,
+                        value='mean', command=self._toggle_wv_mode).pack(side=tk.LEFT, padx=(8, 4))
+        ttk.Radiobutton(mode_frame, text='逐像元栅格', variable=self._wv_mode,
+                        value='raster', command=self._toggle_wv_mode).pack(side=tk.LEFT, padx=(4, 0))
+
+        # ── 平均值模式 ──
+        self._wv_mean_frame = ttk.Frame(main)
+        self._wv_mean_frame.grid(row=row, column=0, columnspan=3,
+                                  sticky='ew', pady=(0, 6)); row += 1
+        ttk.Label(self._wv_mean_frame, text='水汽含量:').pack(side=tk.LEFT)
         self._wv_var = tk.StringVar(value=str(DEFAULT_WATER_VAPOR))
         vcmd = (self.register(self._validate_water_vapor), '%P')
         self._wv_entry = ttk.Entry(
-            wv_frame, textvariable=self._wv_var, width=8,
+            self._wv_mean_frame, textvariable=self._wv_var, width=8,
             validate='focusout', validatecommand=vcmd,
         )
         self._wv_entry.pack(side=tk.LEFT, padx=(6, 4))
-        ttk.Label(wv_frame, text='g/cm²').pack(side=tk.LEFT)
+        ttk.Label(self._wv_mean_frame, text='g/cm²').pack(side=tk.LEFT)
         self._auto_wv_btn = ttk.Button(
-            wv_frame, text='自动获取', width=8,
+            self._wv_mean_frame, text='自动获取', width=8,
             command=self._auto_water_vapor,
         )
         self._auto_wv_btn.pack(side=tk.LEFT, padx=(12, 0))
+
+        # ── 逐像元模式 ──
+        self._wv_raster_frame = ttk.Frame(main)
+        ttk.Label(self._wv_raster_frame, text='MODIS产品:').pack(side=tk.LEFT)
+        self._wv_raster_var = tk.StringVar()
+        self._wv_raster_entry = ttk.Entry(
+            self._wv_raster_frame, textvariable=self._wv_raster_var,
+        )
+        self._wv_raster_entry.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(6, 0))
+        self._wv_browse_btn = ttk.Button(
+            self._wv_raster_frame, text='浏览', width=6,
+            command=self._browse_modis,
+        )
+        self._wv_browse_btn.pack(side=tk.LEFT, padx=(4, 0))
+        self._auto_wv_raster_btn = ttk.Button(
+            self._wv_raster_frame, text='自动获取', width=8,
+            command=self._auto_water_vapor_raster,
+        )
+        self._auto_wv_raster_btn.pack(side=tk.LEFT, padx=(4, 0))
 
         # ── 控制按钮 ──
         btn_frame = ttk.Frame(main)
@@ -215,6 +246,162 @@ class MainWindow(tk.Tk):
 
     def _show_cache(self):
         CacheDialog(self)
+
+    def _toggle_wv_mode(self):
+        """切换水汽模式显示。"""
+        if self._wv_mode.get() == 'raster':
+            self._wv_mean_frame.grid_remove()
+            self._wv_raster_frame.grid(
+                row=self._wv_mean_frame.grid_info()['row'] if self._wv_mean_frame.grid_info() else 5,
+                column=0, columnspan=3, sticky='ew', pady=(0, 6),
+            )
+            self._wv_var.set('')  # clear scalar field when using raster
+        else:
+            self._wv_raster_frame.grid_remove()
+            self._wv_mean_frame.grid()
+            self._wv_raster_path = ''
+
+    def _browse_modis(self):
+        """手动导入 MODIS HDF 产品。"""
+        from tkinter import filedialog
+        path = filedialog.askopenfilename(
+            title='选择 MODIS 水汽产品 (HDF)',
+            filetypes=[('HDF files', '*.hdf'), ('All files', '*.*')],
+        )
+        if not path:
+            return
+        self._wv_raster_var.set(path)
+        # 异步处理：提取 + 重采样
+        self._process_modis_raster(path)
+
+    def _auto_water_vapor_raster(self):
+        """自动获取 MODIS + 逐像元重采样。"""
+        if self._metadata is None:
+            messagebox.showwarning('提示', '请先选择包含 MTL.txt 的影像目录。')
+            return
+
+        acq_dt = self._metadata.acquisition_datetime
+        corners = {
+            'ul': self._metadata.corner_ul, 'ur': self._metadata.corner_ur,
+            'll': self._metadata.corner_ll, 'lr': self._metadata.corner_lr,
+        }
+        if not acq_dt or any(v is None for v in corners.values()):
+            messagebox.showerror('错误', '元数据不完整。')
+            return
+
+        self._auto_wv_raster_btn.configure(state=tk.DISABLED)
+        self._status_var.set('正在获取 MODIS 并重采样...')
+        self._log('正在搜索并下载 MODIS，重采样到 Landsat 网格...')
+
+        def _run():
+            try:
+                from core.water_vapor import (
+                    fetch_water_vapor, extract_wv_arrays,
+                    resample_wv_to_landsat, MODISWaterVaporError,
+                    _check_netrc_has_earthdata,
+                )
+                from utils.file_utils import create_run_cache_dir, get_cache_path, validate_input_directory
+
+                if not _check_netrc_has_earthdata():
+                    self._wv_queue.put({'type': 'wv_need_auth',
+                        'message': '需要 NASA Earthdata 凭据。\n请在"算法设置 → MODIS 数据源"中配置。'})
+                    return
+
+                cache_dir = create_run_cache_dir()
+
+                # 下载
+                wv, source = fetch_water_vapor(
+                    acquisition_datetime=acq_dt, corners=corners,
+                    cache_dir=cache_dir,
+                )
+                # 重采样
+                hdf_files = [f for f in os.listdir(cache_dir) if f.endswith('.hdf')]
+                if not hdf_files:
+                    raise Exception('下载完成但未找到 HDF 文件')
+                hdf_path = os.path.join(cache_dir, hdf_files[0])
+                arrays = extract_wv_arrays(hdf_path, corners)
+                wv_raster_path = get_cache_path(cache_dir, 'wv_raster')
+                scan = validate_input_directory(self._input_var.get().strip())
+                band10_path = scan['bands'].get(10, '')
+                if not band10_path:
+                    raise Exception('未找到 Band 10 参考影像')
+                resample_wv_to_landsat(
+                    arrays['wv'], arrays['lat'], arrays['lon'],
+                    arrays['qa'], band10_path, wv_raster_path,
+                )
+                self._wv_queue.put({
+                    'type': 'wv_raster_done',
+                    'path': wv_raster_path,
+                    'source': source,
+                })
+            except Exception as e:
+                self._wv_queue.put({'type': 'wv_error', 'message': str(e)})
+
+        self._wv_queue = queue.Queue()
+        threading.Thread(target=_run, daemon=True).start()
+        self._poll_wv_raster_queue()
+
+    def _process_modis_raster(self, hdf_path: str):
+        """处理手动导入的 MODIS HDF → 重采样。"""
+        self._status_var.set('正在重采样 MODIS...')
+        self._log(f'导入 MODIS: {os.path.basename(hdf_path)}')
+
+        def _run():
+            try:
+                from core.water_vapor import extract_wv_arrays, resample_wv_to_landsat
+                from utils.file_utils import create_run_cache_dir, get_cache_path, validate_input_directory
+                corners = {
+                    'ul': self._metadata.corner_ul, 'ur': self._metadata.corner_ur,
+                    'll': self._metadata.corner_ll, 'lr': self._metadata.corner_lr,
+                } if self._metadata else None
+                if not corners or any(v is None for v in corners.values()):
+                    raise Exception('元数据不完整，无法提取四至坐标')
+                cache_dir = create_run_cache_dir()
+                arrays = extract_wv_arrays(hdf_path, corners)
+                wv_raster_path = get_cache_path(cache_dir, 'wv_raster')
+                scan = validate_input_directory(self._input_var.get().strip())
+                band10_path = scan['bands'].get(10, '')
+                if not band10_path:
+                    raise Exception('未找到 Band 10 参考影像')
+                resample_wv_to_landsat(
+                    arrays['wv'], arrays['lat'], arrays['lon'],
+                    arrays['qa'], band10_path, wv_raster_path,
+                )
+                self._wv_queue.put({
+                    'type': 'wv_raster_done',
+                    'path': wv_raster_path,
+                    'source': os.path.basename(hdf_path),
+                })
+            except Exception as e:
+                self._wv_queue.put({'type': 'wv_error', 'message': str(e)})
+
+        self._wv_queue = queue.Queue()
+        threading.Thread(target=_run, daemon=True).start()
+        self._poll_wv_raster_queue()
+
+    def _poll_wv_raster_queue(self):
+        """轮询逐像元水汽处理结果。"""
+        try:
+            msg = self._wv_queue.get_nowait()
+        except queue.Empty:
+            self.after(200, self._poll_wv_raster_queue)
+            return
+
+        if msg.get('type') == 'wv_raster_done':
+            self._wv_raster_path = msg['path']
+            self._status_var.set(f'逐像元水汽已就绪: {msg["source"]}')
+            self._log(f'逐像元水汽栅格: {msg["path"]}')
+            self._auto_wv_raster_btn.configure(state=tk.NORMAL)
+        elif msg.get('type') == 'wv_error':
+            self._status_var.set('水汽处理失败')
+            self._log(f'错误: {msg["message"]}')
+            self._auto_wv_raster_btn.configure(state=tk.NORMAL)
+            self._wv_raster_path = ''
+            messagebox.showerror('处理失败', msg['message'])
+        elif msg.get('type') == 'wv_need_auth':
+            self._status_var.set('就绪')
+            self._auto_wv_raster_btn.configure(state=tk.NORMAL)
+            messagebox.showinfo('需要认证', msg['message'])
 
     # ── 水汽验证 ────────────────────────────────────────────
 
