@@ -86,27 +86,47 @@ def save_earthdata_credentials(username: str, password: str):
         f.write(entry)
 
 
-TOKEN_URL = 'https://urs.earthdata.nasa.gov/api/users/token'
+TOKEN_URLS = [
+    'https://urs.earthdata.nasa.gov/api/users/tokens',   # newer endpoint
+    'https://urs.earthdata.nasa.gov/api/users/token',    # legacy endpoint
+]
 
 
 def _get_earthdata_token(username: str, password: str) -> str:
-    """通过用户名密码获取 NASA Earthdata OAuth Bearer Token。"""
-    resp = requests.post(
-        TOKEN_URL,
-        auth=(username, password),
-        headers={'User-Agent': 'LST-Inversion/1.0'},
-        timeout=30,
-    )
-    if resp.status_code == 401:
+    """通过用户名密码获取 NASA Earthdata OAuth Bearer Token。
+
+    尝试多个已知的 token 端点。
+    """
+    errors = []
+    for url in TOKEN_URLS:
+        try:
+            resp = requests.post(
+                url,
+                auth=(username, password),
+                headers={'User-Agent': 'LST-Inversion/1.0'},
+                timeout=30,
+            )
+            if resp.status_code == 200:
+                token = resp.json().get('access_token', '')
+                if token:
+                    return token
+            elif resp.status_code == 401:
+                errors.append(f'{url}: 401 (凭据无效)')
+            else:
+                errors.append(f'{url}: {resp.status_code}')
+        except requests.RequestException as e:
+            errors.append(f'{url}: {e}')
+
+    if any('401' in e for e in errors):
         raise RuntimeError(
             'Earthdata 认证失败：用户名或密码错误。\n'
-            '请在"算法设置 → MODIS 数据源"中重新输入凭据。'
+            '请确认账号已激活（检查注册邮箱的验证邮件）。\n'
+            '在"算法设置 → MODIS 数据源"中重新输入凭据。'
         )
-    resp.raise_for_status()
-    token = resp.json().get('access_token', '')
-    if not token:
-        raise RuntimeError('Earthdata 服务器未返回访问令牌')
-    return token
+    raise RuntimeError(
+        '无法连接到 Earthdata 认证服务器。\n'
+        '请检查网络连接后重试。\n' + '\n'.join(errors)
+    )
 
 
 # ── CMR 搜索 ─────────────────────────────────────────────────
