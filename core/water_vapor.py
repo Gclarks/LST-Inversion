@@ -216,18 +216,17 @@ def _extract_water_vapor(
     if file_size < 1000:
         raise RuntimeError(f'HDF 文件损坏（大小仅 {file_size} 字节）')
 
-    readers = [f for f in (_read_hdf4, _read_hdf5, _read_gdal)
-               if f(hdf_path) is not None]  # 探测可用 reader
-
     errors = []
-    for reader in readers:
+    for reader in (_read_hdf4, _read_hdf5, _read_gdal):
         try:
             data = reader(hdf_path)
             if data is not None:
                 wv, lat, lon, qa = data
                 return _compute_mean_wv(wv, lat, lon, qa, corners)
-        except RuntimeError:
-            raise
+            # reader 返回 None = 不能识别，记录原因
+            errors.append(f'{reader.__name__}: 无法识别该格式')
+        except RuntimeError as e:
+            raise  # 结构性错误直接抛出
         except Exception as e:
             errors.append(f'{reader.__name__}: {e}')
             continue
@@ -236,7 +235,7 @@ def _extract_water_vapor(
         f'无法读取 HDF 文件。\n'
         f'文件: {os.path.basename(hdf_path)}\n'
         f'大小: {file_size} 字节\n'
-        + ('\n'.join(errors) if errors else '无 reader 可识别此格式')
+        + '\n'.join(errors)
     )
 
 
@@ -303,8 +302,19 @@ def _read_hdf5(hdf_path: str):
 
     f.visititems(_search)
     if not wv_paths or not lat_paths or not lon_paths:
+        # 收集所有叶子数据集名帮助诊断
+        all_leaves = []
+        def _collect(name, obj):
+            if isinstance(obj, h5py.Dataset):
+                all_leaves.append(name)
+        f.visititems(_collect)
         f.close()
-        return None
+        raise RuntimeError(
+            f'HDF5 文件结构不匹配。'
+            f'找到 {len(all_leaves)} 个数据集，但缺少所需字段。\n'
+            f'预期: Water_Vapor_Near_Infrared / Latitude / Longitude\n'
+            f'实际前20个: {all_leaves[:20]}'
+        )
 
     wv = f[wv_paths[0]][()].astype(np.float32)
     lat = f[lat_paths[0]][()].astype(np.float32)
