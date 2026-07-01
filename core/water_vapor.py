@@ -352,13 +352,28 @@ def fetch_water_vapor(
             '然后在设置中填写用户名和密码。'
         )
 
-    # 解析成像时间
-    try:
-        target_time = datetime.datetime.strptime(
-            acquisition_datetime.strip(),
-            '%Y-%m-%d %H:%M:%S',
-        )
-    except ValueError:
+    # 解析成像时间（兼容多种格式 & 微秒截断）
+    dt_str = acquisition_datetime.strip()
+    # 去掉尾部 Z（UTC 标记）
+    if dt_str.endswith('Z'):
+        dt_str = dt_str[:-1]
+    # 截断多余的小数秒位（Python %f 只支持 6 位微秒）
+    dt_str = re.sub(r'(\.\d{6})\d+', r'\1', dt_str)
+    # 尝试多种格式
+    formats = [
+        '%Y-%m-%d %H:%M:%S.%f',
+        '%Y-%m-%d %H:%M:%S',
+        '%Y-%m-%dT%H:%M:%S.%f',
+        '%Y-%m-%dT%H:%M:%S',
+    ]
+    target_time = None
+    for fmt in formats:
+        try:
+            target_time = datetime.datetime.strptime(dt_str, fmt)
+            break
+        except ValueError:
+            continue
+    if target_time is None:
         raise MODISWaterVaporError(
             f'无法解析成像时间: {acquisition_datetime}'
         )
