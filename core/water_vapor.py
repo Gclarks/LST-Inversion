@@ -223,10 +223,7 @@ def _extract_water_vapor(
             if data is not None:
                 wv, lat, lon, qa = data
                 return _compute_mean_wv(wv, lat, lon, qa, corners)
-            # reader 返回 None = 不能识别，记录原因
-            errors.append(f'{reader.__name__}: 无法识别该格式')
-        except RuntimeError as e:
-            raise  # 结构性错误直接抛出
+            errors.append(f'{reader.__name__}: 格式不匹配')
         except Exception as e:
             errors.append(f'{reader.__name__}: {e}')
             continue
@@ -240,15 +237,15 @@ def _extract_water_vapor(
 
 
 def _read_hdf4(hdf_path: str):
-    """pyhdf — HDF4 格式。返回 (wv, lat, lon, qa) 或 None。"""
+    """pyhdf — HDF4 格式。返回 (wv, lat, lon, qa) 或 raise。"""
     try:
         from pyhdf.SD import SD, SDC
     except ImportError:
-        return None
+        raise RuntimeError('pyhdf 未安装')
     try:
         hdf = SD(hdf_path, SDC.READ)
-    except Exception:
-        return None
+    except Exception as e:
+        raise RuntimeError(f'pyhdf 无法打开: {e}')
 
     names = list(hdf.datasets().keys())
     if 'Water_Vapor_Near_Infrared' not in names:
@@ -276,15 +273,15 @@ def _read_hdf4(hdf_path: str):
 
 
 def _read_hdf5(hdf_path: str):
-    """h5py — HDF5 格式（NASA Cloud）。返回 (wv, lat, lon, qa) 或 None。"""
+    """h5py — HDF5 格式（NASA Cloud）。返回 (wv, lat, lon, qa) 或 raise。"""
     try:
         import h5py
     except ImportError:
-        return None
+        raise RuntimeError('h5py 未安装')
     try:
         f = h5py.File(hdf_path, 'r')
-    except Exception:
-        return None
+    except Exception as e:
+        raise RuntimeError(f'h5py 无法打开: {e}')
 
     wv_paths, lat_paths, lon_paths, qa_paths = [], [], [], []
 
@@ -328,15 +325,19 @@ def _read_hdf5(hdf_path: str):
 
 
 def _read_gdal(hdf_path: str):
-    """GDAL — 兜底方案。返回 (wv, lat, lon, qa) 或 None。"""
+    """GDAL — 兜底方案。返回 (wv, lat, lon, qa) 或 raise。"""
     try:
         from osgeo import gdal
+        gdal.UseExceptions()
     except ImportError:
-        return None
+        raise RuntimeError('GDAL 未安装')
 
-    ds = gdal.Open(hdf_path)
+    try:
+        ds = gdal.Open(hdf_path)
+    except Exception as e:
+        raise RuntimeError(f'GDAL 无法打开: {e}')
     if ds is None:
-        return None
+        raise RuntimeError('GDAL 无法识别该文件格式')
 
     meta = ds.GetMetadata('SUBDATASETS')
     ds = None
