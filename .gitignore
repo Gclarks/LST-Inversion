@@ -18,6 +18,9 @@ _temp_/
 # Cache directory (runtime data)
 cache/
 
+# Distribution (large binary, use GitHub Releases)
+dist/
+
 
 # Settings with credentials
 .lst_settings.json
