@@ -279,12 +279,13 @@ def _extract_water_vapor(
         raise RuntimeError(f'无法打开 HDF 文件: {e}')
 
     # 获取各 SDS (Scientific Data Set)
-    sds_names = [s[0] for s in hdf.datasets().values()]
+    # pyhdf: datasets() 返回 {name: (rank, dim_sizes, type, num_attrs)}
+    sds_names = list(hdf.datasets().keys())
     for name in ['Water_Vapor_Near_Infrared', 'Latitude', 'Longitude']:
         if name not in sds_names:
             hdf.end()
             raise RuntimeError(
-                f'HDF 中缺少数据层: {name}。'
+                f'HDF 中缺少数据层: {name}。\n'
                 f'可用层: {sds_names}'
             )
 
