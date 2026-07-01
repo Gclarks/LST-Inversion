@@ -86,6 +86,29 @@ def save_earthdata_credentials(username: str, password: str):
         f.write(entry)
 
 
+TOKEN_URL = 'https://urs.earthdata.nasa.gov/api/users/token'
+
+
+def _get_earthdata_token(username: str, password: str) -> str:
+    """通过用户名密码获取 NASA Earthdata OAuth Bearer Token。"""
+    resp = requests.post(
+        TOKEN_URL,
+        auth=(username, password),
+        headers={'User-Agent': 'LST-Inversion/1.0'},
+        timeout=30,
+    )
+    if resp.status_code == 401:
+        raise RuntimeError(
+            'Earthdata 认证失败：用户名或密码错误。\n'
+            '请在"算法设置 → MODIS 数据源"中重新输入凭据。'
+        )
+    resp.raise_for_status()
+    token = resp.json().get('access_token', '')
+    if not token:
+        raise RuntimeError('Earthdata 服务器未返回访问令牌')
+    return token
+
+
 # ── CMR 搜索 ─────────────────────────────────────────────────
 
 def _search_granules(
@@ -160,22 +183,24 @@ def _pick_best_granule(
 
 def _download_hdf(
     url: str, dest_dir: str,
-    username: str = '', password: str = '',
+    token: str = '',
 ) -> str:
     filename = os.path.basename(url.split('?')[0])
     dest = os.path.join(dest_dir, filename)
     if os.path.exists(dest) and os.path.getsize(dest) > 1000:
         return dest
 
-    auth = (username, password) if username and password else None
-    headers = {'User-Agent': 'LST-Inversion/1.0'}
+    headers = {
+        'User-Agent': 'LST-Inversion/1.0',
+        'Authorization': f'Bearer {token}',
+    }
     session = requests.Session()
     session.mount('https://', _TLSAdapter())
 
     last_error = None
     for attempt in range(3):
         try:
-            resp = session.get(url, auth=auth, headers=headers,
+            resp = session.get(url, headers=headers,
                                stream=True, timeout=(30, 120))
             resp.raise_for_status()
             with open(dest, 'wb') as f:
@@ -512,8 +537,14 @@ def fetch_water_vapor(
         raise MODISWaterVaporError(
             '未配置 Earthdata 凭据。\n'
             '请先注册 https://urs.earthdata.nasa.gov/ 账号，\n'
-            '然后在设置中填写用户名和密码。'
+            '然后在"算法设置 → MODIS 数据源"中填写用户名和密码。'
         )
+
+    # 获取 OAuth token
+    try:
+        token = _get_earthdata_token(username, password)
+    except Exception as e:
+        raise MODISWaterVaporError(f'获取访问令牌失败: {e}')
 
     # 解析成像时间
     dt_str = acquisition_datetime.strip()
@@ -557,8 +588,7 @@ def fetch_water_vapor(
                 errors.append(f'{product}: 无法确定最佳 granule')
                 continue
             hdf_path = _download_hdf(
-                best['download_url'], temp_dir,
-                username=username, password=password,
+                best['download_url'], temp_dir, token=token,
             )
             wv = _extract_water_vapor(hdf_path, corners)
             if wv is not None:
