@@ -638,10 +638,16 @@ def resample_wv_to_landsat(
             lats[r, c] = pt[1]
             lons[r, c] = pt[0]
 
-    # KD-tree 查询最近邻
+    # KD-tree 查询最近邻（限制最大距离 0.05° ≈ 5km）
     query = np.column_stack([lats.ravel(), lons.ravel()])
-    _, idx = tree.query(query)
+    dist, idx = tree.query(query, distance_upper_bound=0.05)
+    too_far = np.isinf(dist)
+    idx[too_far] = 0  # 占位，后面用均值覆盖
     wv_grid = values[idx].reshape(rows, cols)
+    if too_far.any() and valid.any():
+        wv_grid = wv_grid.ravel()
+        wv_grid[too_far] = np.nan
+        wv_grid = wv_grid.reshape(rows, cols)
 
     # NaN 像元填全域有效均值，避免 ENVI/QGIS 拉伸异常
     valid = np.isfinite(wv_grid)
