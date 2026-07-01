@@ -9,7 +9,6 @@
 - **NDVI 计算** — 基于 Red (B4) 和 NIR (B5) TOA Reflectance 逐像元计算
 - **地表比辐射率** — NDVI 三段式估算（裸土/混合像元/浓密植被）
 - **单通道算法** — MODTRAN+TIGR 大气廓线拟合系数，3 个水汽区间，Planck 反函数求温
-- **MODIS 水汽自动获取** — CMR API 搜索 → 下载 → 裁剪 → QA 过滤，自动填入水汽值
 - **输出 GeoTIFF** — 保留原始投影和地理参考，可选 K / °C
 
 ## 安装
@@ -25,7 +24,7 @@
 ```bash
 conda create -n lst_env python=3.13
 conda activate lst_env
-conda install -c conda-forge gdal numpy scipy requests pyhdf h5py
+conda install -c conda-forge gdal numpy scipy
 python main.py
 ```
 
@@ -33,7 +32,7 @@ python main.py
 
 1. 点击「浏览」选择 Landsat 8 影像目录（需含 `*_B4.TIF`, `*_B5.TIF`, `*_B10.TIF`, `*_MTL.txt`）
 2. 选择输出目录和文件名
-3. 输入水汽含量或点击「自动获取」（需 NASA Earthdata 账号）
+3. 手动输入水汽含量（g/cm²）
 4. 点击「开始反演」
 
 ## 项目结构
@@ -44,15 +43,13 @@ core/           # 算法模块
   calibration.py  辐射定标
   emissivity.py   NDVI + 地表比辐射率
   lst_inversion.py 单通道算法反演
-  water_vapor.py  MODIS 水汽自动获取
 gui/            # GUI 模块
   main_window.py 主窗口
   metadata_dialog.py 元数据弹窗
   settings_dialog.py 算法设置面板
-  cache_dialog.py 缓存管理
   worker.py     后台处理线程
 utils/          # 工具模块
-  file_utils.py  文件扫描 + 缓存管理
+  file_utils.py  文件扫描
   constants.py   物理常数 + 算法系数
 ```
 
@@ -60,14 +57,12 @@ utils/          # 工具模块
 
 | 分支 | 说明 |
 |------|------|
-| `master` | 完整版，含 MODIS 水汽自动获取 |
+| `master` | 完整版，含 MODIS 水汽自动获取 + 缓存管理 |
 | `v1.0-base` | 基础版，手动输入水汽 |
 
 ## 依赖
 
 - Python 3.13
 - GDAL 3.12
-- NumPy / SciPy
-- pyhdf / h5py（MODIS HDF 读取）
-- requests（MODIS 下载）
+- NumPy
 - Tkinter（GUI，Python 内置）
