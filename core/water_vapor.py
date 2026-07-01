@@ -618,33 +618,23 @@ def resample_wv_to_landsat(
     proj = ref_ds.GetProjection()
     ref_ds = None
 
-    # 构建 Landsat 像元中心坐标 (lon, lat)
+    # 构建 Landsat 像元中心坐标网格
     xs = geo[0] + geo[1] * (np.arange(cols) + 0.5)
     ys = geo[3] + geo[5] * (np.arange(rows) + 0.5)
     xx, yy = np.meshgrid(xs, ys)
 
-    # 投影坐标 → 经纬度
-    src_srs = osr.SpatialReference()
-    src_srs.ImportFromWkt(proj)
-    tgt_srs = osr.SpatialReference()
-    tgt_srs.ImportFromEPSG(4326)
-    transform = osr.CoordinateTransformation(src_srs, tgt_srs)
-
-    lons = np.zeros_like(xx)
-    lats = np.zeros_like(yy)
-    for r in range(rows):
-        for c in range(cols):
-            pt = transform.TransformPoint(xx[r, c], yy[r, c])
-            lats[r, c] = pt[1]
-            lons[r, c] = pt[0]
+    # 投影坐标 → 经纬度（pyproj 向量化，极快）
+    from pyproj import Transformer
+    transformer = Transformer.from_crs(proj, 'EPSG:4326', always_xy=True)
+    lons, lats = transformer.transform(xx, yy)
 
     # KD-tree 查询最近邻（限制最大距离 0.05° ≈ 5km）
     query = np.column_stack([lats.ravel(), lons.ravel()])
     dist, idx = tree.query(query, distance_upper_bound=0.05)
     too_far = np.isinf(dist)
-    idx[too_far] = 0  # 占位，后面用均值覆盖
+    idx[too_far] = 0  # 占位
     wv_grid = values[idx].reshape(rows, cols)
-    if too_far.any() and valid.any():
+    if too_far.any():
         wv_grid = wv_grid.ravel()
         wv_grid[too_far] = np.nan
         wv_grid = wv_grid.reshape(rows, cols)
