@@ -86,46 +86,58 @@ def save_earthdata_credentials(username: str, password: str):
         f.write(entry)
 
 
-TOKEN_URLS = [
-    'https://urs.earthdata.nasa.gov/api/users/tokens',   # newer endpoint
-    'https://urs.earthdata.nasa.gov/api/users/token',    # legacy endpoint
-]
+# Earthdata token endpoint: GET retrieves existing, POST creates new
+TOKEN_URL = 'https://urs.earthdata.nasa.gov/api/users/token'
 
 
 def _get_earthdata_token(username: str, password: str) -> str:
-    """通过用户名密码获取 NASA Earthdata OAuth Bearer Token。
+    """获取 NASA Earthdata Bearer Token。
 
-    尝试多个已知的 token 端点。
+    先 GET 获取已有 token，不存在时 POST 创建。
     """
-    errors = []
-    for url in TOKEN_URLS:
-        try:
-            resp = requests.post(
-                url,
-                auth=(username, password),
-                headers={'User-Agent': 'LST-Inversion/1.0'},
-                timeout=30,
-            )
-            if resp.status_code == 200:
-                token = resp.json().get('access_token', '')
-                if token:
-                    return token
-            elif resp.status_code == 401:
-                errors.append(f'{url}: 401 (凭据无效)')
-            else:
-                errors.append(f'{url}: {resp.status_code}')
-        except requests.RequestException as e:
-            errors.append(f'{url}: {e}')
+    headers = {'User-Agent': 'LST-Inversion/1.0'}
 
-    if any('401' in e for e in errors):
-        raise RuntimeError(
-            'Earthdata 认证失败：用户名或密码错误。\n'
-            '请确认账号已激活（检查注册邮箱的验证邮件）。\n'
-            '在"算法设置 → MODIS 数据源"中重新输入凭据。'
-        )
+    # 尝试 GET 获取已有 token
+    try:
+        resp = requests.get(TOKEN_URL, auth=(username, password),
+                            headers=headers, timeout=30)
+        if resp.status_code == 200:
+            token = resp.json().get('access_token', '')
+            if token:
+                return token
+        elif resp.status_code == 401:
+            raise RuntimeError(
+                'Earthdata 认证失败：用户名或密码错误。\n'
+                '请确认账号已激活（检查注册邮箱的验证邮件）。'
+            )
+    except requests.RequestException:
+        pass
+
+    # GET 失败，尝试 POST 创建新 token
+    try:
+        resp = requests.post(TOKEN_URL, auth=(username, password),
+                             headers=headers, timeout=30)
+        if resp.status_code == 200:
+            token = resp.json().get('access_token', '')
+            if token:
+                return token
+        elif resp.status_code == 401:
+            raise RuntimeError(
+                'Earthdata 认证失败：用户名或密码错误。\n'
+                '请确认账号已激活（检查注册邮箱的验证邮件）。'
+            )
+        elif resp.status_code == 403:
+            raise RuntimeError(
+                'Earthdata 拒绝访问 (403)。\n'
+                '可能原因：账号未激活、IP 被限制、或 NASA 临时封禁。\n'
+                '请尝试在浏览器中登录 https://urs.earthdata.nasa.gov/ 确认账号正常。'
+            )
+    except requests.RequestException as e:
+        raise RuntimeError(f'无法连接 Earthdata: {e}')
+
     raise RuntimeError(
-        '无法连接到 Earthdata 认证服务器。\n'
-        '请检查网络连接后重试。\n' + '\n'.join(errors)
+        '无法获取访问令牌。\n'
+        '请在浏览器中登录 https://urs.earthdata.nasa.gov/ 确认账号正常。'
     )
 
 
