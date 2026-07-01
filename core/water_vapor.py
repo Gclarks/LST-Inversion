@@ -15,7 +15,6 @@ from urllib.parse import urlencode
 
 import numpy as np
 import requests
-from osgeo import gdal
 
 # ── NASA Earthdata 认证 ──────────────────────────────────────
 
@@ -220,6 +219,8 @@ def _extract_water_vapor(
 ) -> Optional[float]:
     """从 MOD05_L2 HDF 文件中提取研究区水汽均值。
 
+    使用 pyhdf 直接读取 HDF-EOS 格式，不依赖 GDAL HDF4 驱动。
+
     Args:
         hdf_path: MODIS HDF 文件路径。
         corners:   Landsat 8 四至角坐标 {'ul': (lat,lon), ...}。
@@ -227,42 +228,48 @@ def _extract_water_vapor(
     Returns:
         平均水汽含量 (g/cm²)，如果无法提取则返回 None。
     """
-    # MOD05_L2 HiRISE-EOS2 Swath 内部路径
-    wv_path = (
-        f'HDF4_EOS:EOS_SWATH:"{hdf_path}":mod05:Water_Vapor_Near_Infrared'
-    )
-    lat_path = f'HDF4_EOS:EOS_SWATH:"{hdf_path}":mod05:Latitude'
-    lon_path = f'HDF4_EOS:EOS_SWATH:"{hdf_path}":mod05:Longitude'
-    qa_path = (
-        f'HDF4_EOS:EOS_SWATH:"{hdf_path}":mod05:'
-        f'Water_Vapor_Near_Infrared_Quality'
-    )
-
-    # 打开各数据层
-    gdal.UseExceptions()  # 确保异常模式，便于诊断
-    ds_wv = gdal.Open(wv_path)
-    ds_lat = gdal.Open(lat_path)
-    ds_lon = gdal.Open(lon_path)
-
-    if ds_wv is None or ds_lat is None or ds_lon is None:
-        missing = []
-        if ds_wv is None: missing.append('Water_Vapor')
-        if ds_lat is None: missing.append('Latitude')
-        if ds_lon is None: missing.append('Longitude')
+    try:
+        from pyhdf.SD import SD, SDC
+    except ImportError:
         raise RuntimeError(
-            f'无法读取 HDF 数据层: {", ".join(missing)}。'
-            f'请确认已安装 GDAL HDF4 驱动 (conda install libgdal-hdf4)。'
+            '缺少 pyhdf 库。请安装: conda install -c conda-forge pyhdf'
         )
 
-    wv = ds_wv.ReadAsArray().astype(np.float32)
-    lat = ds_lat.ReadAsArray().astype(np.float32)
-    lon = ds_lon.ReadAsArray().astype(np.float32)
+    try:
+        hdf = SD(hdf_path, SDC.READ)
+    except Exception as e:
+        raise RuntimeError(f'无法打开 HDF 文件: {e}')
 
-    ds_wv, ds_lat, ds_lon = None, None, None
+    # 获取各 SDS (Scientific Data Set)
+    sds_names = [s[0] for s in hdf.datasets().values()]
+    for name in ['Water_Vapor_Near_Infrared', 'Latitude', 'Longitude']:
+        if name not in sds_names:
+            hdf.end()
+            raise RuntimeError(
+                f'HDF 中缺少数据层: {name}。'
+                f'可用层: {sds_names}'
+            )
 
-    # 缩放因子（MOD05_L2 的 Water_Vapor_Near_Infrared 需要 × scale_factor）
-    # MOD05_L2 NIR Water Vapor: scale_factor = 0.001 (存储为 cm*1000)
-    # 实际读取值可能已经是 float，不需要缩放。检查值范围再决定。
+    try:
+        wv_sds = hdf.select('Water_Vapor_Near_Infrared')
+        lat_sds = hdf.select('Latitude')
+        lon_sds = hdf.select('Longitude')
+        wv = wv_sds.get().astype(np.float32)
+        lat = lat_sds.get().astype(np.float32)
+        lon = lon_sds.get().astype(np.float32)
+
+        # 尝试读取 QA
+        qa = None
+        if 'Water_Vapor_Near_Infrared_Quality' in sds_names:
+            qa = hdf.select('Water_Vapor_Near_Infrared_Quality').get()
+    finally:
+        hdf.end()
+
+    # 缩放因子: MOD05_L2 NIR Water Vapor 可能是 scaled integer 或 float
+    # 如果值在数百以上则乘以 0.001（MOD05 典型 scale_factor）
+    # pyhdf 读取的是原始值，需要手动缩放
+    if np.nanmax(wv) > 100:
+        wv *= 0.001
 
     # 获取研究区边界
     lats = [corners[c][0] for c in corners if corners[c] is not None]
@@ -284,11 +291,7 @@ def _extract_water_vapor(
     data_valid = (wv > wv_fill) & (wv > 0) & np.isfinite(wv)
 
     # QA 掩膜（如果可用）
-    qa_ds = gdal.Open(qa_path)
-    if qa_ds is not None:
-        qa = qa_ds.ReadAsArray()
-        qa_ds = None
-        # QA = 0 为最高质量，允许 0-1
+    if qa is not None:
         qa_valid = (qa >= 0) & (qa <= 1)
         mask = in_bbox & data_valid & qa_valid
     else:
@@ -301,13 +304,6 @@ def _extract_water_vapor(
 
     # 均值
     mean_wv = float(np.mean(wv[mask]))
-
-    # MOD05_L2 的 NIR 水汽数据可能需要转换单位
-    # 标称值范围约 0-6 cm (= g/cm²)
-    # 如果值过大（如 >100），说明需要缩放
-    if mean_wv > 100:
-        mean_wv *= 0.001
-
     return mean_wv
 
 
