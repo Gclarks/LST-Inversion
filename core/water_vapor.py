@@ -643,27 +643,19 @@ def resample_wv_to_landsat(
     _, idx = tree.query(query)
     wv_grid = values[idx].reshape(rows, cols)
 
+    # NaN 像元填全域有效均值，避免 ENVI/QGIS 拉伸异常
+    valid = np.isfinite(wv_grid)
+    if valid.any():
+        fill_val = np.mean(wv_grid[valid])
+        wv_grid[~valid] = fill_val
+    else:
+        wv_grid[~valid] = 0.0
     # 写入 GeoTIFF
     driver = gdal.GetDriverByName('GTiff')
     out_ds = driver.Create(output_path, cols, rows, 1, gdal.GDT_Float32)
     out_ds.SetGeoTransform(geo)
     out_ds.SetProjection(proj)
-    band = out_ds.GetRasterBand(1)
-    # 用数值 NoData（不用 NaN，ENVI 等软件不兼容）
-    wv_out = wv_grid.copy()
-    wv_out[~np.isfinite(wv_out)] = -9999.0
-    band.WriteArray(wv_out)
-    band.SetNoDataValue(-9999.0)
-    # 计算有效值统计
-    valid = wv_out > -9000
-    if valid.any():
-        vmin = float(np.min(wv_out[valid]))
-        vmax = float(np.max(wv_out[valid]))
-        vmean = float(np.mean(wv_out[valid]))
-        # 直接写 TIFF 标签（所有软件都能读）
-        band.SetMetadataItem('STATISTICS_MINIMUM', str(vmin))
-        band.SetMetadataItem('STATISTICS_MAXIMUM', str(vmax))
-        band.SetMetadataItem('STATISTICS_MEAN', str(vmean))
+    out_ds.GetRasterBand(1).WriteArray(wv_grid)
     out_ds = None
     return output_path
 
