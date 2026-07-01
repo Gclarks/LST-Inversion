@@ -648,18 +648,22 @@ def resample_wv_to_landsat(
     out_ds = driver.Create(output_path, cols, rows, 1, gdal.GDT_Float32)
     out_ds.SetGeoTransform(geo)
     out_ds.SetProjection(proj)
-    out_ds.GetRasterBand(1).WriteArray(wv_grid)
     band = out_ds.GetRasterBand(1)
-    band.SetNoDataValue(np.nan)
-    # 写入统计信息，让查看器自动正确拉伸
-    valid = np.isfinite(wv_grid)
+    # 用数值 NoData（不用 NaN，ENVI 等软件不兼容）
+    wv_out = wv_grid.copy()
+    wv_out[~np.isfinite(wv_out)] = -9999.0
+    band.WriteArray(wv_out)
+    band.SetNoDataValue(-9999.0)
+    # 计算有效值统计
+    valid = wv_out > -9000
     if valid.any():
-        band.SetStatistics(
-            float(np.min(wv_grid[valid])),
-            float(np.max(wv_grid[valid])),
-            float(np.mean(wv_grid[valid])),
-            float(np.std(wv_grid[valid])),
-        )
+        vmin = float(np.min(wv_out[valid]))
+        vmax = float(np.max(wv_out[valid]))
+        vmean = float(np.mean(wv_out[valid]))
+        # 直接写 TIFF 标签（所有软件都能读）
+        band.SetMetadataItem('STATISTICS_MINIMUM', str(vmin))
+        band.SetMetadataItem('STATISTICS_MAXIMUM', str(vmax))
+        band.SetMetadataItem('STATISTICS_MEAN', str(vmean))
     out_ds = None
     return output_path
 
