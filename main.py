@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 """
 Landsat 8 单通道算法地表温度反演系统。
-启动入口。
+启动入口
 """
 
 import sys

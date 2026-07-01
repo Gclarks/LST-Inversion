@@ -125,11 +125,6 @@ def invert_lst(
         wv_ds = gdal.Open(water_vapor, gdal.GA_ReadOnly)
         if wv_ds is None:
             raise RuntimeError(f"无法打开水汽栅格: {water_vapor}")
-        # 用全域均值选系数
-        wv_mean = float(np.nanmean(wv_ds.ReadAsArray()))
-        coeffs = _select_coefficients(wv_mean)
-    else:
-        coeffs = _select_coefficients(water_vapor)
 
     # 打开输入
     rad_ds = gdal.Open(radiance_path, gdal.GA_ReadOnly)
@@ -148,6 +143,9 @@ def invert_lst(
     out_ds.SetProjection(rad_ds.GetProjection())
     out_band = out_ds.GetRasterBand(1)
 
+    # 系数表转为易于向量化操作的形式
+    coeff_ranges = sorted(SC_COEFFICIENTS.items())  # [(low,high), {a0..a7}]
+
     # 逐块处理
     rb = rad_ds.GetRasterBand(1)
     eb = emis_ds.GetRasterBand(1)
@@ -164,15 +162,27 @@ def invert_lst(
             l_sen = rb.ReadAsArray(x, y, cols, rows).astype(np.float32)
             emis = eb.ReadAsArray(x, y, cols, rows).astype(np.float32)
 
-            # 水汽：标量或逐像元
             if wv_ds is not None:
-                wv_block = wv_ds.ReadAsArray(x, y, cols, rows).astype(np.float32)
+                wv = wv_ds.ReadAsArray(x, y, cols, rows).astype(np.float32)
+                    # 逐像元系数选择：对每个 wv 区间分别计算
+                bt = np.zeros_like(l_sen)
+                for (low, high), coeffs in coeff_ranges:
+                    mask = (wv >= low) & (wv < high)
+                    if mask.any():
+                        bt[mask] = calc_bt(
+                            l_sen[mask], emis[mask], wv[mask], coeffs,
+                        )
+                # 处理超范围像元（wv≥7.0 或 wv<0），用 Full range 回退
+                fallback_mask = ~np.isfinite(bt) | (bt <= 0)
+                if fallback_mask.any():
+                    bt[fallback_mask] = calc_bt(
+                        l_sen[fallback_mask], emis[fallback_mask],
+                        wv[fallback_mask], SC_COEFFICIENTS_FULL,
+                    )
             else:
-                wv_block = water_vapor
+                coeffs = _select_coefficients(water_vapor)
+                bt = calc_bt(l_sen, emis, water_vapor, coeffs)
 
-            # 公式(1)
-            bt = calc_bt(l_sen, emis, wv_block, coeffs)
-            # 公式(2)
             ts = planck_inverse(bt)
 
             if output_unit == CELSIUS:

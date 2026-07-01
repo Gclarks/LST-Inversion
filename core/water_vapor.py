@@ -649,7 +649,17 @@ def resample_wv_to_landsat(
     out_ds.SetGeoTransform(geo)
     out_ds.SetProjection(proj)
     out_ds.GetRasterBand(1).WriteArray(wv_grid)
-    out_ds.GetRasterBand(1).SetNoDataValue(np.nan)
+    band = out_ds.GetRasterBand(1)
+    band.SetNoDataValue(np.nan)
+    # 写入统计信息，让查看器自动正确拉伸
+    valid = np.isfinite(wv_grid)
+    if valid.any():
+        band.SetStatistics(
+            float(np.min(wv_grid[valid])),
+            float(np.max(wv_grid[valid])),
+            float(np.mean(wv_grid[valid])),
+            float(np.std(wv_grid[valid])),
+        )
     out_ds = None
     return output_path
 
