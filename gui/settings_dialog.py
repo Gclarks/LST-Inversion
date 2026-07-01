@@ -57,16 +57,19 @@ class SettingsDialog(tk.Toplevel):
         self._tab_emissivity = ttk.Frame(notebook)
         self._tab_coeffs = ttk.Frame(notebook)
         self._tab_output = ttk.Frame(notebook)
+        self._tab_modis = ttk.Frame(notebook)
 
         notebook.add(self._tab_physics, text='物理常数')
         notebook.add(self._tab_emissivity, text='NDVI & 比辐射率')
         notebook.add(self._tab_coeffs, text='算法系数 a₀~a₇')
         notebook.add(self._tab_output, text='输出设置')
+        notebook.add(self._tab_modis, text='MODIS 数据源')
 
         self._populate_physics()
         self._populate_emissivity()
         self._populate_coefficients()
         self._populate_output()
+        self._populate_modis()
 
         # 底部按钮
         btn_frame = ttk.Frame(self)
@@ -193,6 +196,47 @@ class SettingsDialog(tk.Toplevel):
         ttk.Label(f, text='\n这些作为默认值，每次处理前可在主界面覆盖。',
                   font=('', 8)).grid(row=4, column=0, columnspan=2, sticky='w')
 
+    # ── 标签页: MODIS 数据源 ─────────────────────────────────
+
+    def _populate_modis(self):
+        f = ttk.Frame(self._tab_modis, padding=(12, 12, 12, 12))
+        f.pack(fill=tk.X)
+        f.grid_columnconfigure(1, weight=1)
+
+        ttk.Label(f, text='NASA Earthdata 凭据',
+                  font=('', 9, 'bold')).grid(
+            row=0, column=0, columnspan=2, sticky='w', pady=(0, 8))
+
+        ttk.Label(f, text='用户名:').grid(row=1, column=0, sticky='w', pady=2)
+        self._modis_user = tk.StringVar()
+        ttk.Entry(f, textvariable=self._modis_user, width=30).grid(
+            row=1, column=1, sticky='ew', pady=2)
+
+        ttk.Label(f, text='密码:').grid(row=2, column=0, sticky='w', pady=2)
+        self._modis_pass = tk.StringVar()
+        ttk.Entry(f, textvariable=self._modis_pass, width=30,
+                  show='*').grid(row=2, column=1, sticky='ew', pady=2)
+
+        # 尝试预填已有凭据
+        try:
+            from core.water_vapor import _netrc_path
+            from netrc import netrc
+            path = _netrc_path()
+            if path:
+                auth = netrc(path).authenticators('urs.earthdata.nasa.gov')
+                if auth:
+                    self._modis_user.set(auth[0])
+                    self._modis_pass.set(auth[2])
+        except Exception:
+            pass
+
+        ttk.Label(f, text=(
+            '\n需要 NASA Earthdata 账号才能自动获取 MODIS 水汽数据。\n'
+            '免费注册: https://urs.earthdata.nasa.gov/\n'
+            '凭据保存在 ~/.netrc 文件中。'
+        ), font=('', 8)).grid(row=3, column=0, columnspan=2,
+                               sticky='w', pady=(12, 0))
+
     # ── 动作 ─────────────────────────────────────────────────
 
     def _load_defaults(self):
@@ -238,6 +282,16 @@ class SettingsDialog(tk.Toplevel):
 
         # 写回 constants 模块
         self._apply_to_constants(settings)
+
+        # 保存 Earthdata 凭据
+        modis_user = self._modis_user.get().strip()
+        modis_pass = self._modis_pass.get().strip()
+        if modis_user and modis_pass:
+            try:
+                from core.water_vapor import save_earthdata_credentials
+                save_earthdata_credentials(modis_user, modis_pass)
+            except Exception as e:
+                messagebox.showwarning('凭据保存失败', str(e))
 
         # 持久化
         self._write_json(settings)

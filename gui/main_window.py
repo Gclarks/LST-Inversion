@@ -37,6 +37,7 @@ class MainWindow(tk.Tk):
         # 运行时状态
         self._worker: InversionWorker | None = None
         self._queue: queue.Queue = queue.Queue()
+        self._wv_queue: queue.Queue = queue.Queue()
         self._cancel_event: threading.Event = threading.Event()
         self._processing = False
         self._metadata: LandsatMetadata | None = None
@@ -114,7 +115,7 @@ class MainWindow(tk.Tk):
         ttk.Label(wv_frame, text='g/cm²').pack(side=tk.LEFT)
         self._auto_wv_btn = ttk.Button(
             wv_frame, text='自动获取', width=8,
-            command=self._auto_water_vapor, state=tk.DISABLED,
+            command=self._auto_water_vapor,
         )
         self._auto_wv_btn.pack(side=tk.LEFT, padx=(12, 0))
 
@@ -222,7 +223,98 @@ class MainWindow(tk.Tk):
         return True
 
     def _auto_water_vapor(self):
-        messagebox.showinfo('提示', '自动获取水汽功能将在后续版本实现。\n请手动输入水汽含量。')
+        """后台线程自动获取 MODIS 水汽含量。"""
+        if self._metadata is None:
+            messagebox.showwarning('提示', '请先选择包含 MTL.txt 的影像目录。')
+            return
+
+        acq_dt = self._metadata.acquisition_datetime
+        corners = {
+            'ul': self._metadata.corner_ul,
+            'ur': self._metadata.corner_ur,
+            'll': self._metadata.corner_ll,
+            'lr': self._metadata.corner_lr,
+        }
+        if not acq_dt or any(v is None for v in corners.values()):
+            messagebox.showerror('错误', '元数据不完整，缺少成像时间或四至坐标。')
+            return
+
+        # 禁用按钮，开始获取
+        self._auto_wv_btn.configure(state=tk.DISABLED)
+        self._wv_entry.configure(state=tk.DISABLED)
+        self._status_var.set('正在获取 MODIS 水汽含量...')
+        self._log('正在搜索并下载 MODIS 水汽产品...')
+
+        def _run():
+            try:
+                from core.water_vapor import (
+                    fetch_water_vapor, MODISWaterVaporError,
+                    _check_netrc_has_earthdata,
+                )
+                if not _check_netrc_has_earthdata():
+                    self._wv_queue.put({
+                        'type': 'wv_need_auth',
+                        'message': '需要 NASA Earthdata 凭据。\n请在"算法设置"中配置。',
+                    })
+                    return
+
+                wv, source = fetch_water_vapor(
+                    acquisition_datetime=acq_dt,
+                    corners=corners,
+                )
+                self._wv_queue.put({
+                    'type': 'wv_done',
+                    'water_vapor': wv,
+                    'source': source,
+                })
+            except MODISWaterVaporError as e:
+                self._wv_queue.put({
+                    'type': 'wv_error',
+                    'message': str(e),
+                })
+            except Exception as e:
+                self._wv_queue.put({
+                    'type': 'wv_error',
+                    'message': f'获取失败: {e}',
+                })
+
+        self._wv_queue = queue.Queue()
+        threading.Thread(target=_run, daemon=True).start()
+        self._poll_wv_queue()
+
+    def _poll_wv_queue(self):
+        """轮询水汽获取线程的返回消息。"""
+        try:
+            msg = self._wv_queue.get_nowait()
+        except queue.Empty:
+            self.after(200, self._poll_wv_queue)
+            return
+
+        msg_type = msg.get('type', '')
+
+        if msg_type == 'wv_need_auth':
+            self._auto_wv_btn.configure(state=tk.NORMAL)
+            self._wv_entry.configure(state=tk.NORMAL)
+            self._status_var.set('就绪')
+            self._log(msg.get('message', ''))
+            messagebox.showinfo('需要认证', msg.get('message', ''))
+
+        elif msg_type == 'wv_done':
+            wv = msg['water_vapor']
+            source = msg['source']
+            self._wv_var.set(f'{wv:.4f}')
+            self._auto_wv_btn.configure(state=tk.NORMAL)
+            self._wv_entry.configure(state=tk.NORMAL)
+            self._status_var.set(f'水汽含量: {wv:.4f} g/cm²')
+            self._log(f'水汽含量获取成功: {wv:.4f} g/cm²')
+            self._log(f'数据来源: {source}')
+
+        elif msg_type == 'wv_error':
+            self._auto_wv_btn.configure(state=tk.NORMAL)
+            self._wv_entry.configure(state=tk.NORMAL)
+            self._status_var.set('就绪')
+            self._log(f'水汽获取失败: {msg.get("message", "")}')
+            messagebox.showerror('获取失败', msg.get('message', ''))
 
     # ── 反演启动 ────────────────────────────────────────────
 

@@ -17,3 +17,9 @@ from .lst_inversion import (
     planck_inverse,
     calc_bt,
 )
+from .water_vapor import (
+    fetch_water_vapor,
+    save_earthdata_credentials,
+    MODISWaterVaporError,
+    _check_netrc_has_earthdata,
+)
