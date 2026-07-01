@@ -15,6 +15,10 @@ build/
 _temp_/
 *.tif.aux.xml
 
+# Cache directory (runtime data)
+cache/
+
+
 # Settings with credentials
 .lst_settings.json
 

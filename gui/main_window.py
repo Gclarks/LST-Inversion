@@ -12,6 +12,7 @@ from tkinter import ttk, filedialog, messagebox
 
 from core.metadata import LandsatMetadata
 from gui.metadata_dialog import MetadataDialog
+from gui.cache_dialog import CacheDialog
 from gui.settings_dialog import SettingsDialog, load_settings_from_file
 from gui.worker import InversionWorker
 from utils.file_utils import validate_input_directory
@@ -131,6 +132,9 @@ class MainWindow(tk.Tk):
         self._settings_btn = ttk.Button(btn_frame, text='算法设置', width=12,
                                         command=self._show_settings)
         self._settings_btn.pack(side=tk.LEFT, padx=(8, 0))
+        self._cache_btn = ttk.Button(btn_frame, text='管理缓存', width=12,
+                                     command=self._show_cache)
+        self._cache_btn.pack(side=tk.LEFT, padx=(8, 0))
         self._start_btn = ttk.Button(
             btn_frame, text='开始反演', width=14,
             command=self._start_inversion,
@@ -208,6 +212,9 @@ class MainWindow(tk.Tk):
     def _show_settings(self):
         SettingsDialog(self)
 
+    def _show_cache(self):
+        CacheDialog(self)
+
     # ── 水汽验证 ────────────────────────────────────────────
 
     def _validate_water_vapor(self, value: str) -> bool:
@@ -258,9 +265,12 @@ class MainWindow(tk.Tk):
                     })
                     return
 
+                from utils.file_utils import create_run_cache_dir
+                cache_dir = create_run_cache_dir()
                 wv, source = fetch_water_vapor(
                     acquisition_datetime=acq_dt,
                     corners=corners,
+                    cache_dir=cache_dir,
                 )
                 self._wv_queue.put({
                     'type': 'wv_done',
@@ -444,6 +454,7 @@ class MainWindow(tk.Tk):
         self._wv_entry.configure(state=state)
         self._meta_btn.configure(state=state)
         self._settings_btn.configure(state=state)
+        self._cache_btn.configure(state=state)
         self._browse_input_btn.configure(state=state)
         self._browse_output_btn.configure(state=state)
 
@@ -471,6 +482,7 @@ class MainWindow(tk.Tk):
         self._wv_entry.configure(state=state)
         self._meta_btn.configure(state=state)
         self._settings_btn.configure(state=state)
+        self._cache_btn.configure(state=state)
         self._browse_input_btn.configure(state=state)
         self._browse_output_btn.configure(state=state)
         # 如输入目录仍有效，保持元数据按钮可用

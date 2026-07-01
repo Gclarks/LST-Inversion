@@ -384,6 +384,7 @@ def fetch_water_vapor(
     username: str = '',
     password: str = '',
     time_window_hours: float = 1.0,
+    cache_dir: str = '',
 ) -> tuple[float, str]:
     """获取 Landsat 8 影像对应的大气水汽含量。
 
@@ -456,7 +457,11 @@ def fetch_water_vapor(
     if bbox is None:
         raise MODISWaterVaporError('无法从角坐标构建包围盒')
 
-    temp_dir = tempfile.mkdtemp(prefix='modis_wv_')
+    if cache_dir:
+        os.makedirs(cache_dir, exist_ok=True)
+        temp_dir = cache_dir
+    else:
+        temp_dir = tempfile.mkdtemp(prefix='modis_wv_')
     errors = []
 
     for product in PRODUCTS:
@@ -496,22 +501,26 @@ def fetch_water_vapor(
         except Exception as e:
             errors.append(f'{product}: {e}')
         finally:
-            # 清理下载的 HDF 文件
-            _cleanup_temp_dir(temp_dir, keep_dir=True)
+            # 仅在使用临时目录时清理
+            if not cache_dir:
+                _cleanup_temp_dir(temp_dir, keep_dir=True)
 
     # 回退：扩大时间窗口
     if time_window_hours < 3.0:
-        _cleanup_temp_dir(temp_dir, keep_dir=False)
+        if not cache_dir:
+            _cleanup_temp_dir(temp_dir, keep_dir=False)
         try:
             return fetch_water_vapor(
                 acquisition_datetime, corners,
                 username=username, password=password,
                 time_window_hours=3.0,
+                cache_dir=cache_dir,
             )
         except MODISWaterVaporError:
             pass
 
-    _cleanup_temp_dir(temp_dir, keep_dir=False)
+    if not cache_dir:
+        _cleanup_temp_dir(temp_dir, keep_dir=False)
     raise MODISWaterVaporError(
         '未能获取有效水汽含量:\n' + '\n'.join(f'  • {e}' for e in errors)
     )
