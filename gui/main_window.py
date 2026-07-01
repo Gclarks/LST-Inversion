@@ -131,6 +131,11 @@ class MainWindow(tk.Tk):
             self._wv_mean_frame, text='自动获取', width=8,
             command=self._auto_water_vapor,
         )
+        self._wv_import_btn = ttk.Button(
+            self._wv_mean_frame, text='导入', width=6,
+            command=self._import_wv_mean,
+        )
+        self._wv_import_btn.pack(side=tk.LEFT, padx=(4, 0))
         self._auto_wv_btn.pack(side=tk.LEFT, padx=(12, 0))
 
         # ── 逐像元模式 ──
@@ -251,15 +256,47 @@ class MainWindow(tk.Tk):
         """切换水汽模式显示。"""
         if self._wv_mode.get() == 'raster':
             self._wv_mean_frame.grid_remove()
+            # 放到和 mean_frame 相同的位置
             self._wv_raster_frame.grid(
-                row=self._wv_mean_frame.grid_info()['row'] if self._wv_mean_frame.grid_info() else 5,
-                column=0, columnspan=3, sticky='ew', pady=(0, 6),
+                row=7, column=0, columnspan=3, sticky='ew', pady=(0, 6),
             )
-            self._wv_var.set('')  # clear scalar field when using raster
+            self._wv_raster_var.set('')
         else:
             self._wv_raster_frame.grid_remove()
             self._wv_mean_frame.grid()
-            self._wv_raster_path = ''
+
+    def _import_wv_mean(self):
+        """手动导入 MODIS HDF → 计算均值填入水汽输入框。"""
+        path = filedialog.askopenfilename(
+            title='选择 MODIS 水汽产品 (HDF)',
+            filetypes=[('HDF files', '*.hdf'), ('All files', '*.*')],
+        )
+        if not path:
+            return
+        if self._metadata is None:
+            messagebox.showwarning('提示', '请先选择包含 MTL.txt 的影像目录（用于提取四至坐标）。')
+            return
+        corners = {
+            'ul': self._metadata.corner_ul, 'ur': self._metadata.corner_ur,
+            'll': self._metadata.corner_ll, 'lr': self._metadata.corner_lr,
+        }
+        self._status_var.set('正在计算水汽均值...')
+        self._log(f'导入 MODIS: {os.path.basename(path)}')
+        def _run():
+            try:
+                from core.water_vapor import _extract_water_vapor
+                wv = _extract_water_vapor(path, corners)
+                if wv is not None:
+                    self._wv_var.set(f'{wv:.4f}')
+                    self._status_var.set(f'水汽含量: {wv:.4f} g/cm²')
+                    self._log(f'水汽均值: {wv:.4f} g/cm²')
+                else:
+                    self._status_var.set('失败: 无有效像元')
+                    self._log('未能在研究区内找到有效水汽像元')
+            except Exception as e:
+                self._status_var.set('失败')
+                self._log(f'导入失败: {e}')
+        threading.Thread(target=_run, daemon=True).start()
 
     def _browse_modis(self):
         """手动导入 MODIS HDF 产品。"""
