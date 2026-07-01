@@ -203,34 +203,61 @@ def _extract_water_vapor(
     corners: dict[str, tuple[float, float]],
 ) -> Optional[float]:
     """从 MODIS HDF 提取研究区水汽均值，自动适配 HDF4/HDF5/GDAL。"""
-    if hdf_path.endswith('.gz'):
-        decompressed = hdf_path[:-3]
-        with gzip.open(hdf_path, 'rb') as gz:
-            with open(decompressed, 'wb') as out:
-                out.write(gz.read())
-        hdf_path = decompressed
-
     if not os.path.isfile(hdf_path):
         raise RuntimeError(f'HDF 文件不存在: {hdf_path}')
     file_size = os.path.getsize(hdf_path)
     if file_size < 1000:
         raise RuntimeError(f'HDF 文件损坏（大小仅 {file_size} 字节）')
 
+    # 魔数检测：优先用匹配的 reader
+    with open(hdf_path, 'rb') as fh:
+        magic = fh.read(4)
+    is_hdf4 = (magic[:4] == b'\x0e\x03\x13\x01')
+    is_hdf5 = (magic[:4] == b'\x89HDF')
+    is_gzip = (magic[:2] == b'\x1f\x8b')
+
+    if is_gzip:
+        import gzip
+        decompressed = hdf_path[:-3] if hdf_path.endswith('.gz') else hdf_path + '.dec'
+        with gzip.open(hdf_path, 'rb') as gz:
+            with open(decompressed, 'wb') as out:
+                out.write(gz.read())
+        hdf_path = decompressed
+        with open(hdf_path, 'rb') as fh:
+            magic = fh.read(4)
+        is_hdf4 = (magic[:4] == b'\x0e\x03\x13\x01')
+        is_hdf5 = (magic[:4] == b'\x89HDF')
+
     errors = []
-    for reader in (_read_hdf4, _read_hdf5, _read_gdal):
-        try:
-            data = reader(hdf_path)
-            if data is not None:
-                wv, lat, lon, qa = data
-                return _compute_mean_wv(wv, lat, lon, qa, corners)
-            errors.append(f'{reader.__name__}: 格式不匹配')
-        except Exception as e:
-            errors.append(f'{reader.__name__}: {e}')
+    readers = []
+    if is_hdf4:
+        readers = [_read_hdf4] + [_r for _r in (_read_hdf5, _read_gdal) if _r != _read_hdf4]
+    elif is_hdf5:
+        readers = [_read_hdf5] + [_r for _r in (_read_hdf4, _read_gdal) if _r != _read_hdf5]
+    else:
+        readers = [_read_hdf4, _read_hdf5, _read_gdal]
+        errors.append(f'未知魔数: {magic[:4].hex()}')
+
+    for reader in readers:
+        for attempt in range(2):  # HDF4 有时瞬态失败，重试一次
+            try:
+                data = reader(hdf_path)
+                if data is not None:
+                    wv, lat, lon, qa = data
+                    return _compute_mean_wv(wv, lat, lon, qa, corners)
+                break  # reader 返回 None = 格式不适用
+            except Exception as e:
+                if attempt == 0 and reader is _read_hdf4:
+                    time.sleep(0.5)  # 稍等后重试
+                    continue
+                errors.append(f'{reader.__name__}: {e}')
+                break
+        else:
             continue
 
     raise RuntimeError(
         f'无法读取 HDF 文件。\n'
-        f'文件: {os.path.basename(hdf_path)}\n'
+        f'文件: {os.path.basename(hdf_path)} 魔数: {magic[:4].hex()}\n'
         f'大小: {file_size} 字节\n'
         + '\n'.join(errors)
     )
