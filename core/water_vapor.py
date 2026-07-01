@@ -239,12 +239,20 @@ def _extract_water_vapor(
     )
 
     # 打开各数据层
+    gdal.UseExceptions()  # 确保异常模式，便于诊断
     ds_wv = gdal.Open(wv_path)
     ds_lat = gdal.Open(lat_path)
     ds_lon = gdal.Open(lon_path)
 
     if ds_wv is None or ds_lat is None or ds_lon is None:
-        return None
+        missing = []
+        if ds_wv is None: missing.append('Water_Vapor')
+        if ds_lat is None: missing.append('Latitude')
+        if ds_lon is None: missing.append('Longitude')
+        raise RuntimeError(
+            f'无法读取 HDF 数据层: {", ".join(missing)}。'
+            f'请确认已安装 GDAL HDF4 驱动 (conda install libgdal-hdf4)。'
+        )
 
     wv = ds_wv.ReadAsArray().astype(np.float32)
     lat = ds_lat.ReadAsArray().astype(np.float32)
