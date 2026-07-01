@@ -13,8 +13,11 @@ import time
 from typing import Optional
 from urllib.parse import urlencode
 
+import ssl
+
 import numpy as np
 import requests
+from requests.adapters import HTTPAdapter
 
 # ── NASA Earthdata 认证 ──────────────────────────────────────
 
@@ -187,13 +190,22 @@ def _pick_best_granule(
 
 # ── 下载 ─────────────────────────────────────────────────────
 
+# SSL adapter ensuring TLS 1.2+ for NASA Earthdata Cloud servers
+class _TLSAdapter(HTTPAdapter):
+    def init_poolmanager(self, *args, **kwargs):
+        ctx = ssl.create_default_context()
+        ctx.minimum_version = ssl.TLSVersion.TLSv1_2
+        kwargs['ssl_context'] = ctx
+        return super().init_poolmanager(*args, **kwargs)
+
+
 def _download_hdf(
     url: str,
     dest_dir: str,
     username: str = '',
     password: str = '',
 ) -> str:
-    """下载 HDF 文件到目标目录，支持认证。返回本地文件路径。"""
+    """下载 HDF 文件到目标目录，支持认证和重试。返回本地文件路径。"""
     filename = os.path.basename(url.split('?')[0])
     dest = os.path.join(dest_dir, filename)
 
@@ -201,14 +213,40 @@ def _download_hdf(
         return dest
 
     auth = (username, password) if username and password else None
+    headers = {
+        'User-Agent': 'LST-Inversion/1.0',
+    }
 
-    with requests.get(url, auth=auth, stream=True, timeout=120) as resp:
-        resp.raise_for_status()
-        with open(dest, 'wb') as f:
-            for chunk in resp.iter_content(chunk_size=8192):
-                f.write(chunk)
+    session = requests.Session()
+    session.mount('https://', _TLSAdapter())
 
-    return dest
+    max_retries = 3
+    last_error = None
+
+    for attempt in range(max_retries):
+        try:
+            resp = session.get(
+                url,
+                auth=auth,
+                headers=headers,
+                stream=True,
+                timeout=(30, 120),
+            )
+            resp.raise_for_status()
+            with open(dest, 'wb') as f:
+                for chunk in resp.iter_content(chunk_size=8192):
+                    f.write(chunk)
+            session.close()
+            return dest
+        except requests.RequestException as e:
+            last_error = e
+            if attempt < max_retries - 1:
+                time.sleep(2 ** attempt)
+
+    session.close()
+    raise requests.RequestException(
+        f'下载失败 (已重试 {max_retries} 次): {last_error}'
+    )
 
 
 # ── HDF 提取 ─────────────────────────────────────────────────
