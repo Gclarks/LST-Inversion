@@ -269,10 +269,47 @@ def _read_hdf4(hdf_path: str):
         from pyhdf.SD import SD, SDC
     except ImportError:
         raise RuntimeError('pyhdf 未安装')
+
+    # 复制到纯 ASCII 临时路径，规避 Windows 下可能的路径/锁问题
+    import shutil
+    tmp = os.path.join(tempfile.gettempdir(), '_lst_modis_read.hdf')
+    shutil.copy2(hdf_path, tmp)
     try:
-        hdf = SD(hdf_path, SDC.READ)
+        hdf = SD(tmp, SDC.READ)
     except Exception as e:
+        os.unlink(tmp)
         raise RuntimeError(f'pyhdf 无法打开: {e}')
+    # 注意：hdf 句柄保持打开，调用者用完后需 hdf.end()；tmp 文件在 .end() 后可删
+    # 我们返回时会先读完数据再 end，见下方
+    return _read_pyhdf_datasets(hdf, tmp)
+
+
+def _read_pyhdf_datasets(hdf, tmp_path: str):
+    """从 pyhdf SD 对象读取数据层，清理临时文件，返回 (wv, lat, lon, qa)。"""
+    try:
+        names = list(hdf.datasets().keys())
+        if 'Water_Vapor_Near_Infrared' not in names:
+            return None
+        wv = hdf.select('Water_Vapor_Near_Infrared').get().astype(np.float32)
+        lat = lon = None
+        for n in ('Latitude', 'Latitude_1km'):
+            if n in names: lat = hdf.select(n).get().astype(np.float32); break
+        for n in ('Longitude', 'Longitude_1km'):
+            if n in names: lon = hdf.select(n).get().astype(np.float32); break
+        qa = None
+        for n in ('Water_Vapor_Near_Infrared_Quality', 'Quality_Assurance_NIR'):
+            if n in names: qa = hdf.select(n).get(); break
+    finally:
+        hdf.end()
+        try:
+            os.unlink(tmp_path)
+        except Exception:
+            pass
+    if lat is None or lon is None:
+        return None
+    if np.nanmax(wv) > 100:
+        wv *= 0.001
+    return _align_resolution(wv, lat, lon, qa)
 
     names = list(hdf.datasets().keys())
     if 'Water_Vapor_Near_Infrared' not in names:
