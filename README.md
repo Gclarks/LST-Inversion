@@ -47,9 +47,10 @@ gui/            # GUI 模块
   main_window.py 主窗口
   metadata_dialog.py 元数据弹窗
   settings_dialog.py 算法设置面板
+  cache_dialog.py 缓存管理
   worker.py     后台处理线程
 utils/          # 工具模块
-  file_utils.py  文件扫描
+  file_utils.py  文件扫描 + 缓存管理
   constants.py   物理常数 + 算法系数
 ```
 
@@ -58,7 +59,7 @@ utils/          # 工具模块
 | 分支 | 说明 |
 |------|------|
 | `master` | 完整版，含 MODIS 水汽自动获取 + 缓存管理 |
-| `v1.0-base` | 基础版，手动输入水汽 |
+| `v1.0-base` | 基础版，手动输入水汽，含缓存管理 |
 
 ## 依赖
 

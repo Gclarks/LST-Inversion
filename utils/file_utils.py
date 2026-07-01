@@ -93,9 +93,7 @@ def validate_input_directory(input_dir: str) -> dict:
     return result
 
 
-# ── 临时文件管理 ────────────────────────────────────────────
-
-TEMP_DIR_NAME = '_temp_'
+# ── 缓存文件管理 ────────────────────────────────────────────
 
 # 中间产品文件名
 TEMP_FILES = {
@@ -104,36 +102,70 @@ TEMP_FILES = {
     'toa_ref_b5':      'toa_reflectance_b5.tif',  # Band 5 TOA Reflectance
     'ndvi':            'ndvi.tif',
     'emissivity':      'emissivity.tif',
+    'inversion_log':   'inversion_log.txt',        # 处理日志
 }
 
 
-def create_temp_dir(base_path: str) -> str:
-    """在 base_path 下创建临时目录，返回其完整路径。已存在则不报错。"""
-    temp_dir = os.path.join(base_path, TEMP_DIR_NAME)
-    os.makedirs(temp_dir, exist_ok=True)
-    return temp_dir
+def _get_project_root() -> str:
+    """获取项目根目录路径。"""
+    return os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
-def get_temp_path(temp_dir: str, key: str) -> str:
-    """获取指定中间产品在临时目录中的完整路径。
+def get_cache_dir() -> str:
+    """获取缓存根目录路径 (项目根/cache/)。"""
+    return os.path.join(_get_project_root(), 'cache')
 
-    Args:
-        temp_dir: 临时目录路径。
-        key: TEMP_FILES 中的键名，如 'toa_radiance', 'ndvi' 等。
-    """
+
+def create_run_cache_dir() -> str:
+    """在 cache/ 下创建时间戳子文件夹并返回路径。"""
+    import datetime
+    timestamp = datetime.datetime.now().strftime('%Y%m%d_%H%M%S')
+    path = os.path.join(get_cache_dir(), timestamp)
+    os.makedirs(path, exist_ok=True)
+    return path
+
+
+def get_cache_path(cache_dir: str, key: str) -> str:
+    """获取指定中间产品在缓存目录中的完整路径。"""
     filename = TEMP_FILES.get(key)
     if filename is None:
-        raise KeyError(f"未知的临时文件键名: {key}。可用: {list(TEMP_FILES)}")
-    return os.path.join(temp_dir, filename)
+        raise KeyError(f"未知的缓存文件键名: {key}。可用: {list(TEMP_FILES)}")
+    return os.path.join(cache_dir, filename)
 
 
-def cleanup_temp_dir(temp_dir: str) -> bool:
-    """删除临时目录及其全部内容。
+def list_cache_folders() -> list[dict]:
+    """列出所有缓存子文件夹及其信息。"""
+    cache_dir = get_cache_dir()
+    if not os.path.isdir(cache_dir):
+        return []
+    result = []
+    for name in sorted(os.listdir(cache_dir), reverse=True):
+        path = os.path.join(cache_dir, name)
+        if not os.path.isdir(path):
+            continue
+        total_size = 0
+        file_count = 0
+        for dirpath, _, filenames in os.walk(path):
+            for fn in filenames:
+                fp = os.path.join(dirpath, fn)
+                try:
+                    total_size += os.path.getsize(fp)
+                except OSError:
+                    pass
+                file_count += 1
+        result.append({
+            'name': name,
+            'path': path,
+            'size_mb': round(total_size / (1024 * 1024), 2),
+            'file_count': file_count,
+        })
+    return result
 
-    Returns:
-        True 表示删除成功，False 表示目录不存在。
-    """
-    if not os.path.isdir(temp_dir):
+
+def delete_cache_folder(name: str) -> bool:
+    """删除指定名称的缓存子文件夹。"""
+    path = os.path.join(get_cache_dir(), name)
+    if not os.path.isdir(path):
         return False
-    shutil.rmtree(temp_dir)
+    shutil.rmtree(path)
     return True
