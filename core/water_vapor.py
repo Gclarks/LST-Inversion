@@ -93,11 +93,11 @@ TOKEN_URL = 'https://urs.earthdata.nasa.gov/api/users/token'
 def _get_earthdata_token(username: str, password: str) -> str:
     """获取 NASA Earthdata Bearer Token。
 
-    先 GET 获取已有 token，不存在时 POST 创建。
+    尝试多种认证方式：Basic Auth header → form data。
     """
     headers = {'User-Agent': 'LST-Inversion/1.0'}
 
-    # 尝试 GET 获取已有 token
+    # 方式 1: GET with Basic Auth
     try:
         resp = requests.get(TOKEN_URL, auth=(username, password),
                             headers=headers, timeout=30)
@@ -105,15 +105,10 @@ def _get_earthdata_token(username: str, password: str) -> str:
             token = resp.json().get('access_token', '')
             if token:
                 return token
-        elif resp.status_code == 401:
-            raise RuntimeError(
-                'Earthdata 认证失败：用户名或密码错误。\n'
-                '请确认账号已激活（检查注册邮箱的验证邮件）。'
-            )
     except requests.RequestException:
         pass
 
-    # GET 失败，尝试 POST 创建新 token
+    # 方式 2: POST with Basic Auth
     try:
         resp = requests.post(TOKEN_URL, auth=(username, password),
                              headers=headers, timeout=30)
@@ -121,23 +116,35 @@ def _get_earthdata_token(username: str, password: str) -> str:
             token = resp.json().get('access_token', '')
             if token:
                 return token
-        elif resp.status_code == 401:
-            raise RuntimeError(
-                'Earthdata 认证失败：用户名或密码错误。\n'
-                '请确认账号已激活（检查注册邮箱的验证邮件）。'
-            )
-        elif resp.status_code == 403:
-            raise RuntimeError(
-                'Earthdata 拒绝访问 (403)。\n'
-                '可能原因：账号未激活、IP 被限制、或 NASA 临时封禁。\n'
-                '请尝试在浏览器中登录 https://urs.earthdata.nasa.gov/ 确认账号正常。'
-            )
-    except requests.RequestException as e:
-        raise RuntimeError(f'无法连接 Earthdata: {e}')
+    except requests.RequestException:
+        pass
 
+    # 方式 3: POST with form data (no Basic Auth header)
+    try:
+        resp = requests.post(
+            TOKEN_URL,
+            data={'username': username, 'password': password,
+                  'client_id': 'PIR2OBoAXa-jbm8w9WyxPQ',
+                  'grant_type': 'password'},
+            headers=headers,
+            timeout=30,
+        )
+        if resp.status_code == 200:
+            j = resp.json()
+            token = j.get('access_token') or j.get('token') or ''
+            if token:
+                return token
+    except requests.RequestException:
+        pass
+
+    # 全部失败，给出明确提示
     raise RuntimeError(
-        '无法获取访问令牌。\n'
-        '请在浏览器中登录 https://urs.earthdata.nasa.gov/ 确认账号正常。'
+        '无法获取 Earthdata 访问令牌。\n\n'
+        '请确认：\n'
+        '1. 已在 https://urs.earthdata.nasa.gov/ 注册并激活账号\n'
+        '2. 在浏览器中能正常登录上述网址\n'
+        '3. 在"算法设置 → MODIS 数据源"中填入的用户名密码与网页登录一致\n\n'
+        '如以上均无误，可能是 NASA 服务器临时故障，请稍后重试。'
     )
 
 
