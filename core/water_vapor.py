@@ -236,10 +236,21 @@ def _download_hdf(
             with open(dest, 'wb') as f:
                 for chunk in resp.iter_content(chunk_size=8192):
                     f.write(chunk)
+
+            # 校验下载完整性
+            file_size = os.path.getsize(dest)
+            if file_size < 1000:
+                raise requests.RequestException(
+                    f'下载文件异常小 ({file_size} 字节)，可能不完整'
+                )
+
             session.close()
             return dest
         except requests.RequestException as e:
             last_error = e
+            # 删除不完整的文件
+            if os.path.exists(dest):
+                os.unlink(dest)
             if attempt < max_retries - 1:
                 time.sleep(2 ** attempt)
 
@@ -273,10 +284,30 @@ def _extract_water_vapor(
             '缺少 pyhdf 库。请安装: conda install -c conda-forge pyhdf'
         )
 
+    # 校验文件完整性
+    if not os.path.isfile(hdf_path):
+        raise RuntimeError(f'HDF 文件不存在: {hdf_path}')
+    file_size = os.path.getsize(hdf_path)
+    if file_size < 1000:
+        raise RuntimeError(f'HDF 文件损坏（大小仅 {file_size} 字节）')
+
+    # 如果文件是 gzip 压缩的，先解压
+    if hdf_path.endswith('.gz'):
+        import gzip
+        decompressed = hdf_path[:-3]  # 去掉 .gz
+        with gzip.open(hdf_path, 'rb') as gz:
+            with open(decompressed, 'wb') as out:
+                out.write(gz.read())
+        hdf_path = decompressed
+
     try:
         hdf = SD(hdf_path, SDC.READ)
     except Exception as e:
-        raise RuntimeError(f'无法打开 HDF 文件: {e}')
+        raise RuntimeError(
+            f'无法打开 HDF 文件: {e}\n'
+            f'文件: {os.path.basename(hdf_path)}\n'
+            f'大小: {file_size} 字节'
+        )
 
     # 获取各 SDS (Scientific Data Set)
     # pyhdf: datasets() 返回 {name: (rank, dim_sizes, type, num_attrs)}
