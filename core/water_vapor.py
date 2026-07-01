@@ -90,6 +90,23 @@ def save_earthdata_credentials(username: str, password: str):
 TOKEN_URL = 'https://urs.earthdata.nasa.gov/api/users/token'
 
 
+def _create_earthdata_session(username: str, password: str) -> requests.Session:
+    """创建带 NASA Earthdata 认证的 requests Session。
+
+    Session 会为所有到 urs.earthdata.nasa.gov 的请求自动发送 Basic Auth，
+    从而正确处理 OAuth 重定向链。
+    """
+    session = requests.Session()
+    session.auth = (username, password)
+    session.headers.update({'User-Agent': 'LST-Inversion/1.0'})
+    # 预热：先访问 URS 建立 cookies/session
+    try:
+        session.get('https://urs.earthdata.nasa.gov/', timeout=15)
+    except requests.RequestException:
+        pass
+    return session
+
+
 def _get_earthdata_token(username: str, password: str) -> str:
     """获取 NASA Earthdata Bearer Token。
 
@@ -222,25 +239,17 @@ def _pick_best_granule(
 
 def _download_hdf(
     url: str, dest_dir: str,
-    token: str = '',
+    session: requests.Session,
 ) -> str:
     filename = os.path.basename(url.split('?')[0])
     dest = os.path.join(dest_dir, filename)
     if os.path.exists(dest) and os.path.getsize(dest) > 1000:
         return dest
 
-    headers = {
-        'User-Agent': 'LST-Inversion/1.0',
-        'Authorization': f'Bearer {token}',
-    }
-    session = requests.Session()
-    session.mount('https://', _TLSAdapter())
-
     last_error = None
     for attempt in range(3):
         try:
-            resp = session.get(url, headers=headers,
-                               stream=True, timeout=(30, 120))
+            resp = session.get(url, stream=True, timeout=(30, 120))
             resp.raise_for_status()
             with open(dest, 'wb') as f:
                 for chunk in resp.iter_content(chunk_size=8192):
@@ -248,7 +257,6 @@ def _download_hdf(
             size = os.path.getsize(dest)
             if size < 1000:
                 raise requests.RequestException(f'文件异常小 ({size} 字节)')
-            session.close()
             return dest
         except requests.RequestException as e:
             last_error = e
@@ -256,7 +264,6 @@ def _download_hdf(
                 os.unlink(dest)
             if attempt < 2:
                 time.sleep(2 ** attempt)
-    session.close()
     raise requests.RequestException(f'下载失败 (已重试 3 次): {last_error}')
 
 
@@ -579,11 +586,8 @@ def fetch_water_vapor(
             '然后在"算法设置 → MODIS 数据源"中填写用户名和密码。'
         )
 
-    # 获取 OAuth token
-    try:
-        token = _get_earthdata_token(username, password)
-    except Exception as e:
-        raise MODISWaterVaporError(f'获取访问令牌失败: {e}')
+    # 创建带认证的 session（自动处理 OAuth 重定向）
+    session = _create_earthdata_session(username, password)
 
     # 解析成像时间
     dt_str = acquisition_datetime.strip()
@@ -627,7 +631,7 @@ def fetch_water_vapor(
                 errors.append(f'{product}: 无法确定最佳 granule')
                 continue
             hdf_path = _download_hdf(
-                best['download_url'], temp_dir, token=token,
+                best['download_url'], temp_dir, session=session,
             )
             wv = _extract_water_vapor(hdf_path, corners)
             if wv is not None:
