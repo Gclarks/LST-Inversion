@@ -155,6 +155,11 @@ class MainWindow(tk.Tk):
             command=self._browse_modis,
         )
         self._wv_browse_btn.pack(side=tk.LEFT, padx=(4, 0))
+        self._wv_import_raster_btn = ttk.Button(
+            self._wv_raster_frame, text='导入结果', width=8,
+            command=self._import_wv_raster,
+        )
+        self._wv_import_raster_btn.pack(side=tk.LEFT, padx=(4, 0))
         self._auto_wv_raster_btn = ttk.Button(
             self._wv_raster_frame, text='自动获取', width=8,
             command=self._auto_water_vapor_raster,
@@ -311,6 +316,19 @@ class MainWindow(tk.Tk):
         # 异步处理：提取 + 重采样
         self._process_modis_raster(path)
 
+    def _import_wv_raster(self):
+        """导入已处理的 wv_raster.tif 直接使用。"""
+        path = filedialog.askopenfilename(
+            title='选择已重采样的水汽栅格',
+            filetypes=[('GeoTIFF', '*.tif'), ('All files', '*.*')],
+        )
+        if not path:
+            return
+        self._wv_raster_path = path
+        self._wv_raster_var.set(path)
+        self._status_var.set(f'逐像元水汽已就绪: {os.path.basename(path)}')
+        self._log(f'导入水汽栅格: {path}')
+
     def _auto_water_vapor_raster(self):
         """自动获取 MODIS + 逐像元重采样。"""
         if self._metadata is None:
@@ -426,6 +444,7 @@ class MainWindow(tk.Tk):
 
         if msg.get('type') == 'wv_raster_done':
             self._wv_raster_path = msg['path']
+            self._wv_raster_var.set(msg['path'])
             self._status_var.set(f'逐像元水汽已就绪: {msg["source"]}')
             self._log(f'逐像元水汽栅格: {msg["path"]}')
             self._auto_wv_raster_btn.configure(state=tk.NORMAL)
