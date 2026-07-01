@@ -291,18 +291,43 @@ def _extract_water_vapor(
 
     try:
         wv_sds = hdf.select('Water_Vapor_Near_Infrared')
-        lat_sds = hdf.select('Latitude')
-        lon_sds = hdf.select('Longitude')
         wv = wv_sds.get().astype(np.float32)
-        lat = lat_sds.get().astype(np.float32)
-        lon = lon_sds.get().astype(np.float32)
 
-        # 尝试读取 QA
+        # 地理定位数据：优先 1km，回退到 5km
+        lat, lon = None, None
+        for lat_name in ('Latitude', 'Latitude_1km'):
+            if lat_name in sds_names:
+                lat = hdf.select(lat_name).get().astype(np.float32)
+                break
+        for lon_name in ('Longitude', 'Longitude_1km'):
+            if lon_name in sds_names:
+                lon = hdf.select(lon_name).get().astype(np.float32)
+                break
+
+        if lat is None or lon is None:
+            hdf.end()
+            raise RuntimeError('HDF 中缺少 Latitude/Longitude 数据层')
+
+        # 尝试读取 QA（1km 或 5km 均可）
         qa = None
-        if 'Water_Vapor_Near_Infrared_Quality' in sds_names:
-            qa = hdf.select('Water_Vapor_Near_Infrared_Quality').get()
+        for qa_name in ('Water_Vapor_Near_Infrared_Quality',
+                         'Quality_Assurance_NIR'):
+            if qa_name in sds_names:
+                qa = hdf.select(qa_name).get()
+                break
     finally:
         hdf.end()
+
+    # 若地理定位与 WV 分辨率不一致，将 WV 降采样到定位分辨率
+    if lat.shape != wv.shape:
+        _h, _w = lat.shape
+        # 简单分块平均：每 block_h × block_w 取均值
+        bh = wv.shape[0] // _h
+        bw = wv.shape[1] // _w
+        if bh > 0 and bw > 0:
+            # 裁剪到可整除
+            wv_crop = wv[:bh * _h, :bw * _w]
+            wv = wv_crop.reshape(_h, bh, _w, bw).mean(axis=(1, 3))
 
     # 缩放因子: MOD05_L2 NIR Water Vapor 可能是 scaled integer 或 float
     # 如果值在数百以上则乘以 0.001（MOD05 典型 scale_factor）
@@ -329,8 +354,8 @@ def _extract_water_vapor(
     wv_fill = -9999.0  # MODIS fill value
     data_valid = (wv > wv_fill) & (wv > 0) & np.isfinite(wv)
 
-    # QA 掩膜（如果可用）
-    if qa is not None:
+    # QA 掩膜（仅当分辨率匹配时使用）
+    if qa is not None and qa.shape == wv.shape:
         qa_valid = (qa >= 0) & (qa <= 1)
         mask = in_bbox & data_valid & qa_valid
     else:
