@@ -2,40 +2,47 @@
 MODIS 大气水汽含量自动获取模块。
 通过 NASA CMR API 搜索与 Landsat 8 影像时空匹配的 MODIS 水汽产品，
 下载、裁剪至研究区、质量过滤后取均值，输出水汽含量 w (g/cm²)。
+
+自动适配 HDF4 / HDF5 / GDAL 三种数据格式。
 """
 
 import datetime
+import gzip
 import math
 import os
 import re
+import ssl
 import tempfile
 import time
 from typing import Optional
 from urllib.parse import urlencode
 
-import ssl
-
 import numpy as np
 import requests
 from requests.adapters import HTTPAdapter
 
+
+# ── SSL 适配器 ────────────────────────────────────────────────
+
+class _TLSAdapter(HTTPAdapter):
+    """强制 TLS 1.2+，兼容 NASA Earthdata Cloud 服务器。"""
+    def init_poolmanager(self, *args, **kwargs):
+        ctx = ssl.create_default_context()
+        ctx.minimum_version = ssl.TLSVersion.TLSv1_2
+        kwargs['ssl_context'] = ctx
+        return super().init_poolmanager(*args, **kwargs)
+
+
 # ── NASA Earthdata 认证 ──────────────────────────────────────
 
-# Earthdata URS 地址
 URS_MACHINE = 'urs.earthdata.nasa.gov'
 
-# 产品列表（按优先级）
-PRODUCTS = [
-    'MOD05_L2',   # Terra 水汽产品，~10:30 AM，与 Landsat 8 时间最接近
-    'MYD05_L2',   # Aqua 水汽产品，~1:30 PM，回退
-]
+PRODUCTS = ['MOD05_L2', 'MYD05_L2']
 
-# CMR 搜索 API
 CMR_GRANULES_URL = 'https://cmr.earthdata.nasa.gov/search/granules.json'
 
 
 def _netrc_path() -> Optional[str]:
-    """获取系统 .netrc / _netrc 文件路径。"""
     home = os.path.expanduser('~')
     for name in ('_netrc', '.netrc'):
         p = os.path.join(home, name)
@@ -45,47 +52,36 @@ def _netrc_path() -> Optional[str]:
 
 
 def _check_netrc_has_earthdata() -> bool:
-    """检查 .netrc 中是否包含 Earthdata 凭据。"""
     path = _netrc_path()
     if not path:
         return False
     try:
         with open(path, 'r') as f:
-            content = f.read()
-        return f'machine {URS_MACHINE}' in content
+            return f'machine {URS_MACHINE}' in f.read()
     except Exception:
         return False
 
 
 def save_earthdata_credentials(username: str, password: str):
-    """将 Earthdata 凭据追加到 .netrc。"""
     home = os.path.expanduser('~')
-    # Windows 使用 _netrc，Unix 使用 .netrc
     name = '_netrc' if os.name == 'nt' else '.netrc'
     path = os.path.join(home, name)
-
     entry = (
         f'\nmachine {URS_MACHINE}'
         f'\n    login {username}'
         f'\n    password {password}\n'
     )
-
-    # 检查是否已有 Earthdata 条目
     if os.path.isfile(path):
         with open(path, 'r') as f:
             content = f.read()
         if f'machine {URS_MACHINE}' in content:
-            # 替换已有条目
             content = re.sub(
                 rf'machine\s+{re.escape(URS_MACHINE)}\s*\n\s*login\s+\S+\s*\n\s*password\s+\S+',
-                entry.strip(),
-                content,
+                entry.strip(), content,
             )
             with open(path, 'w') as f:
                 f.write(content)
             return
-
-    # 追加
     with open(path, 'a') as f:
         f.write(entry)
 
@@ -99,18 +95,6 @@ def _search_granules(
     bbox: tuple[float, float, float, float],
     max_results: int = 10,
 ) -> list[dict]:
-    """搜索 CMR 获取 granules 列表。
-
-    Args:
-        product:     产品短名，如 'MOD05_L2'。
-        start_time:  搜索起始时间 (UTC)。
-        end_time:    搜索结束时间 (UTC)。
-        bbox:        (lon_min, lat_min, lon_max, lat_max)。
-        max_results: 最大返回数。
-
-    Returns:
-        granules 列表，每个 granule 包含 title, time_start, time_end, download_url。
-    """
     params = {
         'short_name': product,
         'temporal': (
@@ -122,37 +106,29 @@ def _search_granules(
         'sort_key': '-start_date',
     }
     url = CMR_GRANULES_URL + '?' + urlencode(params)
-
     resp = requests.get(url, timeout=30)
     resp.raise_for_status()
     data = resp.json()
 
     entries = data.get('feed', {}).get('entry', [])
     if not isinstance(entries, list):
-        entries = [entries]  # 单条结果不是列表
+        entries = [entries]
 
     granules = []
     for entry in entries:
-        title = entry.get('title', '')
-        time_start = entry.get('time_start', '')
-        time_end = entry.get('time_end', '')
-
-        # 找 download URL
         download_url = None
         for link in entry.get('links', []):
             href = link.get('href', '')
             if href.endswith('.hdf') or href.endswith('.hdf.gz'):
                 download_url = href
                 break
-
         if download_url:
             granules.append({
-                'title': title,
-                'time_start': time_start,
-                'time_end': time_end,
+                'title': entry.get('title', ''),
+                'time_start': entry.get('time_start', ''),
+                'time_end': entry.get('time_end', ''),
                 'download_url': download_url,
             })
-
     return granules
 
 
@@ -160,15 +136,8 @@ def _pick_best_granule(
     granules: list[dict],
     target_time: datetime.datetime,
 ) -> Optional[dict]:
-    """从搜索结果中选取时间最接近目标的 granule。"""
-    if not granules:
-        return None
-
-    best = None
-    best_delta = float('inf')
-
+    best, best_delta = None, float('inf')
     for g in granules:
-        # 用 time_start 或 time_end 计算时间差
         for key in ('time_start', 'time_end'):
             ts = g.get(key, '')
             if not ts:
@@ -184,189 +153,236 @@ def _pick_best_granule(
             if delta < best_delta:
                 best_delta = delta
                 best = g
-
     return best
 
 
 # ── 下载 ─────────────────────────────────────────────────────
 
-# SSL adapter ensuring TLS 1.2+ for NASA Earthdata Cloud servers
-class _TLSAdapter(HTTPAdapter):
-    def init_poolmanager(self, *args, **kwargs):
-        ctx = ssl.create_default_context()
-        ctx.minimum_version = ssl.TLSVersion.TLSv1_2
-        kwargs['ssl_context'] = ctx
-        return super().init_poolmanager(*args, **kwargs)
-
-
 def _download_hdf(
-    url: str,
-    dest_dir: str,
-    username: str = '',
-    password: str = '',
+    url: str, dest_dir: str,
+    username: str = '', password: str = '',
 ) -> str:
-    """下载 HDF 文件到目标目录，支持认证和重试。返回本地文件路径。"""
     filename = os.path.basename(url.split('?')[0])
     dest = os.path.join(dest_dir, filename)
-
-    if os.path.exists(dest):
+    if os.path.exists(dest) and os.path.getsize(dest) > 1000:
         return dest
 
     auth = (username, password) if username and password else None
-    headers = {
-        'User-Agent': 'LST-Inversion/1.0',
-    }
-
+    headers = {'User-Agent': 'LST-Inversion/1.0'}
     session = requests.Session()
     session.mount('https://', _TLSAdapter())
 
-    max_retries = 3
     last_error = None
-
-    for attempt in range(max_retries):
+    for attempt in range(3):
         try:
-            resp = session.get(
-                url,
-                auth=auth,
-                headers=headers,
-                stream=True,
-                timeout=(30, 120),
-            )
+            resp = session.get(url, auth=auth, headers=headers,
+                               stream=True, timeout=(30, 120))
             resp.raise_for_status()
             with open(dest, 'wb') as f:
                 for chunk in resp.iter_content(chunk_size=8192):
                     f.write(chunk)
-
-            # 校验下载完整性
-            file_size = os.path.getsize(dest)
-            if file_size < 1000:
-                raise requests.RequestException(
-                    f'下载文件异常小 ({file_size} 字节)，可能不完整'
-                )
-
+            size = os.path.getsize(dest)
+            if size < 1000:
+                raise requests.RequestException(f'文件异常小 ({size} 字节)')
             session.close()
             return dest
         except requests.RequestException as e:
             last_error = e
-            # 删除不完整的文件
             if os.path.exists(dest):
                 os.unlink(dest)
-            if attempt < max_retries - 1:
+            if attempt < 2:
                 time.sleep(2 ** attempt)
-
     session.close()
-    raise requests.RequestException(
-        f'下载失败 (已重试 {max_retries} 次): {last_error}'
-    )
+    raise requests.RequestException(f'下载失败 (已重试 3 次): {last_error}')
 
 
-# ── HDF 提取 ─────────────────────────────────────────────────
+# ── HDF 提取（多格式）────────────────────────────────────────
 
 def _extract_water_vapor(
     hdf_path: str,
     corners: dict[str, tuple[float, float]],
 ) -> Optional[float]:
-    """从 MOD05_L2 HDF 文件中提取研究区水汽均值。
+    """从 MODIS HDF 提取研究区水汽均值，自动适配 HDF4/HDF5/GDAL。"""
+    if hdf_path.endswith('.gz'):
+        decompressed = hdf_path[:-3]
+        with gzip.open(hdf_path, 'rb') as gz:
+            with open(decompressed, 'wb') as out:
+                out.write(gz.read())
+        hdf_path = decompressed
 
-    使用 pyhdf 直接读取 HDF-EOS 格式，不依赖 GDAL HDF4 驱动。
-
-    Args:
-        hdf_path: MODIS HDF 文件路径。
-        corners:   Landsat 8 四至角坐标 {'ul': (lat,lon), ...}。
-
-    Returns:
-        平均水汽含量 (g/cm²)，如果无法提取则返回 None。
-    """
-    try:
-        from pyhdf.SD import SD, SDC
-    except ImportError:
-        raise RuntimeError(
-            '缺少 pyhdf 库。请安装: conda install -c conda-forge pyhdf'
-        )
-
-    # 校验文件完整性
     if not os.path.isfile(hdf_path):
         raise RuntimeError(f'HDF 文件不存在: {hdf_path}')
     file_size = os.path.getsize(hdf_path)
     if file_size < 1000:
         raise RuntimeError(f'HDF 文件损坏（大小仅 {file_size} 字节）')
 
-    # 如果文件是 gzip 压缩的，先解压
-    if hdf_path.endswith('.gz'):
-        import gzip
-        decompressed = hdf_path[:-3]  # 去掉 .gz
-        with gzip.open(hdf_path, 'rb') as gz:
-            with open(decompressed, 'wb') as out:
-                out.write(gz.read())
-        hdf_path = decompressed
+    readers = [f for f in (_read_hdf4, _read_hdf5, _read_gdal)
+               if f(hdf_path) is not None]  # 探测可用 reader
 
+    errors = []
+    for reader in readers:
+        try:
+            data = reader(hdf_path)
+            if data is not None:
+                wv, lat, lon, qa = data
+                return _compute_mean_wv(wv, lat, lon, qa, corners)
+        except RuntimeError:
+            raise
+        except Exception as e:
+            errors.append(f'{reader.__name__}: {e}')
+            continue
+
+    raise RuntimeError(
+        f'无法读取 HDF 文件。\n'
+        f'文件: {os.path.basename(hdf_path)}\n'
+        f'大小: {file_size} 字节\n'
+        + ('\n'.join(errors) if errors else '无 reader 可识别此格式')
+    )
+
+
+def _read_hdf4(hdf_path: str):
+    """pyhdf — HDF4 格式。返回 (wv, lat, lon, qa) 或 None。"""
+    try:
+        from pyhdf.SD import SD, SDC
+    except ImportError:
+        return None
     try:
         hdf = SD(hdf_path, SDC.READ)
-    except Exception as e:
-        raise RuntimeError(
-            f'无法打开 HDF 文件: {e}\n'
-            f'文件: {os.path.basename(hdf_path)}\n'
-            f'大小: {file_size} 字节'
-        )
+    except Exception:
+        return None
 
-    # 获取各 SDS (Scientific Data Set)
-    # pyhdf: datasets() 返回 {name: (rank, dim_sizes, type, num_attrs)}
-    sds_names = list(hdf.datasets().keys())
-    for name in ['Water_Vapor_Near_Infrared', 'Latitude', 'Longitude']:
-        if name not in sds_names:
-            hdf.end()
-            raise RuntimeError(
-                f'HDF 中缺少数据层: {name}。\n'
-                f'可用层: {sds_names}'
-            )
-
-    try:
-        wv_sds = hdf.select('Water_Vapor_Near_Infrared')
-        wv = wv_sds.get().astype(np.float32)
-
-        # 地理定位数据：优先 1km，回退到 5km
-        lat, lon = None, None
-        for lat_name in ('Latitude', 'Latitude_1km'):
-            if lat_name in sds_names:
-                lat = hdf.select(lat_name).get().astype(np.float32)
-                break
-        for lon_name in ('Longitude', 'Longitude_1km'):
-            if lon_name in sds_names:
-                lon = hdf.select(lon_name).get().astype(np.float32)
-                break
-
-        if lat is None or lon is None:
-            hdf.end()
-            raise RuntimeError('HDF 中缺少 Latitude/Longitude 数据层')
-
-        # 尝试读取 QA（1km 或 5km 均可）
-        qa = None
-        for qa_name in ('Water_Vapor_Near_Infrared_Quality',
-                         'Quality_Assurance_NIR'):
-            if qa_name in sds_names:
-                qa = hdf.select(qa_name).get()
-                break
-    finally:
+    names = list(hdf.datasets().keys())
+    if 'Water_Vapor_Near_Infrared' not in names:
         hdf.end()
+        return None
 
-    # 若地理定位与 WV 分辨率不一致，将 WV 降采样到定位分辨率
-    if lat.shape != wv.shape:
-        _h, _w = lat.shape
-        # 简单分块平均：每 block_h × block_w 取均值
-        bh = wv.shape[0] // _h
-        bw = wv.shape[1] // _w
-        if bh > 0 and bw > 0:
-            # 裁剪到可整除
-            wv_crop = wv[:bh * _h, :bw * _w]
-            wv = wv_crop.reshape(_h, bh, _w, bw).mean(axis=(1, 3))
+    wv = hdf.select('Water_Vapor_Near_Infrared').get().astype(np.float32)
 
-    # 缩放因子: MOD05_L2 NIR Water Vapor 可能是 scaled integer 或 float
-    # 如果值在数百以上则乘以 0.001（MOD05 典型 scale_factor）
-    # pyhdf 读取的是原始值，需要手动缩放
+    lat = lon = None
+    for n in ('Latitude', 'Latitude_1km'):
+        if n in names: lat = hdf.select(n).get().astype(np.float32); break
+    for n in ('Longitude', 'Longitude_1km'):
+        if n in names: lon = hdf.select(n).get().astype(np.float32); break
+
+    qa = None
+    for n in ('Water_Vapor_Near_Infrared_Quality', 'Quality_Assurance_NIR'):
+        if n in names: qa = hdf.select(n).get(); break
+
+    hdf.end()
+    if lat is None or lon is None:
+        return None
     if np.nanmax(wv) > 100:
         wv *= 0.001
+    return _align_resolution(wv, lat, lon, qa)
 
-    # 获取研究区边界
+
+def _read_hdf5(hdf_path: str):
+    """h5py — HDF5 格式（NASA Cloud）。返回 (wv, lat, lon, qa) 或 None。"""
+    try:
+        import h5py
+    except ImportError:
+        return None
+    try:
+        f = h5py.File(hdf_path, 'r')
+    except Exception:
+        return None
+
+    wv_paths, lat_paths, lon_paths, qa_paths = [], [], [], []
+
+    def _search(name, obj):
+        if isinstance(obj, h5py.Dataset):
+            bn = os.path.basename(name)
+            if bn == 'Water_Vapor_Near_Infrared':
+                wv_paths.append(name)
+            elif bn in ('Latitude', 'Latitude_1km'):
+                lat_paths.append(name)
+            elif bn in ('Longitude', 'Longitude_1km'):
+                lon_paths.append(name)
+            elif 'Quality' in bn and 'NIR' in bn:
+                qa_paths.append(name)
+
+    f.visititems(_search)
+    if not wv_paths or not lat_paths or not lon_paths:
+        f.close()
+        return None
+
+    wv = f[wv_paths[0]][()].astype(np.float32)
+    lat = f[lat_paths[0]][()].astype(np.float32)
+    lon = f[lon_paths[0]][()].astype(np.float32)
+    qa = f[qa_paths[0]][()] if qa_paths else None
+    f.close()
+
+    if np.nanmax(wv) > 100:
+        wv *= 0.001
+    return _align_resolution(wv, lat, lon, qa)
+
+
+def _read_gdal(hdf_path: str):
+    """GDAL — 兜底方案。返回 (wv, lat, lon, qa) 或 None。"""
+    try:
+        from osgeo import gdal
+    except ImportError:
+        return None
+
+    ds = gdal.Open(hdf_path)
+    if ds is None:
+        return None
+
+    meta = ds.GetMetadata('SUBDATASETS')
+    ds = None
+    if not meta:
+        return None
+
+    subdatasets = {}
+    for k, v in meta.items():
+        m = re.match(r'SUBDATASET_\d+_(NAME|DESC)', k)
+        if m:
+            subdatasets.setdefault(m.group(1), {})[k] = v
+
+    # 构建 NAME→path 映射
+    name_to_path = {}
+    for k, v in meta.items():
+        m = re.match(r'SUBDATASET_(\d+)_NAME', k)
+        if m:
+            desc_key = k.replace('_NAME', '_DESC')
+            if desc_key in meta:
+                name_to_path[meta[desc_key]] = v
+
+    def _find(*patterns):
+        for pat in patterns:
+            for desc, path in name_to_path.items():
+                if re.search(pat, desc, re.IGNORECASE):
+                    d = gdal.Open(path)
+                    if d:
+                        arr = d.ReadAsArray().astype(np.float32)
+                        d = None
+                        return arr
+        return None
+
+    wv = _find('Water_Vapor_Near_Infrared')
+    lat = _find('Latitude')
+    lon = _find('Longitude')
+    qa = _find(r'Water_Vapor_Near_Infrared_Quality|Quality_Assurance_NIR')
+
+    if wv is None or lat is None or lon is None:
+        return None
+    if np.nanmax(wv) > 100:
+        wv *= 0.001
+    return _align_resolution(wv, lat, lon, qa)
+
+
+def _align_resolution(wv, lat, lon, qa):
+    """分辨率对齐：若 wv 与 lat/lon 形状不同，降采样 wv。"""
+    if lat.shape != wv.shape:
+        h, w = lat.shape
+        bh, bw = wv.shape[0] // h, wv.shape[1] // w
+        if bh > 0 and bw > 0:
+            wv = wv[:bh * h, :bw * w].reshape(h, bh, w, bw).mean(axis=(1, 3))
+    return wv, lat, lon, qa
+
+
+def _compute_mean_wv(wv, lat, lon, qa, corners) -> Optional[float]:
+    """计算研究区水汽均值。"""
     lats = [corners[c][0] for c in corners if corners[c] is not None]
     lons = [corners[c][1] for c in corners if corners[c] is not None]
     if len(lats) < 4 or len(lons) < 4:
@@ -375,31 +391,19 @@ def _extract_water_vapor(
     lat_min, lat_max = min(lats), max(lats)
     lon_min, lon_max = min(lons), max(lons)
 
-    # 空间掩膜
-    in_bbox = (
-        (lat >= lat_min) & (lat <= lat_max) &
-        (lon >= lon_min) & (lon <= lon_max)
-    )
+    in_bbox = ((lat >= lat_min) & (lat <= lat_max) &
+               (lon >= lon_min) & (lon <= lon_max))
+    data_valid = (wv > -9999) & (wv > 0) & np.isfinite(wv)
 
-    # 数据质量掩膜
-    wv_fill = -9999.0  # MODIS fill value
-    data_valid = (wv > wv_fill) & (wv > 0) & np.isfinite(wv)
-
-    # QA 掩膜（仅当分辨率匹配时使用）
     if qa is not None and qa.shape == wv.shape:
-        qa_valid = (qa >= 0) & (qa <= 1)
-        mask = in_bbox & data_valid & qa_valid
+        mask = in_bbox & data_valid & ((qa >= 0) & (qa <= 1))
     else:
         mask = in_bbox & data_valid
 
     count = np.sum(mask)
     if count < 10:
-        # 有效像元太少（云覆盖 / 不在条带内）
         return None
-
-    # 均值
-    mean_wv = float(np.mean(wv[mask]))
-    return mean_wv
+    return float(np.mean(wv[mask]))
 
 
 # ── 公开接口 ─────────────────────────────────────────────────
@@ -417,31 +421,15 @@ def fetch_water_vapor(
     time_window_hours: float = 1.0,
     cache_dir: str = '',
 ) -> tuple[float, str]:
-    """获取 Landsat 8 影像对应的大气水汽含量。
-
-    按优先级尝试不同 MODIS 产品，返回最匹配的水汽值。
-
-    Args:
-        acquisition_datetime: 成像时间字符串 "YYYY-MM-DD HH:MM:SS"。
-        corners:              四至角坐标 {'ul': (lat,lon), ...}。
-        username:             Earthdata 用户名。
-        password:             Earthdata 密码。
-        time_window_hours:    搜索时间窗口（小时），默认 ±1。
-
-    Returns:
-        (water_vapor_g_cm2, source_info)
-
-    Raises:
-        MODISWaterVaporError: 所有产品尝试失败时。
-    """
-    # 尝试从 .netrc 获取凭据
+    """获取 Landsat 8 影像对应的大气水汽含量。"""
     if not username or not password:
         try:
             from netrc import netrc
-            auth = netrc(_netrc_path()).authenticators(URS_MACHINE)
-            if auth:
-                username = auth[0]
-                password = auth[2]
+            path = _netrc_path()
+            if path:
+                auth = netrc(path).authenticators(URS_MACHINE)
+                if auth:
+                    username, password = auth[0], auth[2]
         except Exception:
             pass
 
@@ -452,38 +440,26 @@ def fetch_water_vapor(
             '然后在设置中填写用户名和密码。'
         )
 
-    # 解析成像时间（兼容多种格式 & 微秒截断）
+    # 解析成像时间
     dt_str = acquisition_datetime.strip()
-    # 去掉尾部 Z（UTC 标记）
     if dt_str.endswith('Z'):
         dt_str = dt_str[:-1]
-    # 截断多余的小数秒位（Python %f 只支持 6 位微秒）
     dt_str = re.sub(r'(\.\d{6})\d+', r'\1', dt_str)
-    # 尝试多种格式
-    formats = [
-        '%Y-%m-%d %H:%M:%S.%f',
-        '%Y-%m-%d %H:%M:%S',
-        '%Y-%m-%dT%H:%M:%S.%f',
-        '%Y-%m-%dT%H:%M:%S',
-    ]
     target_time = None
-    for fmt in formats:
+    for fmt in ('%Y-%m-%d %H:%M:%S.%f', '%Y-%m-%d %H:%M:%S',
+                '%Y-%m-%dT%H:%M:%S.%f', '%Y-%m-%dT%H:%M:%S'):
         try:
             target_time = datetime.datetime.strptime(dt_str, fmt)
             break
         except ValueError:
             continue
     if target_time is None:
-        raise MODISWaterVaporError(
-            f'无法解析成像时间: {acquisition_datetime}'
-        )
+        raise MODISWaterVaporError(f'无法解析成像时间: {acquisition_datetime}')
 
-    # 构建搜索窗口
     window = datetime.timedelta(hours=time_window_hours)
     start_time = target_time - window
     end_time = target_time + window
 
-    # 构建包围盒
     bbox = _corners_to_bbox(corners)
     if bbox is None:
         raise MODISWaterVaporError('无法从角坐标构建包围盒')
@@ -497,61 +473,44 @@ def fetch_water_vapor(
 
     for product in PRODUCTS:
         try:
-            # 搜索
             granules = _search_granules(product, start_time, end_time, bbox)
             if not granules:
                 errors.append(f'{product}: 无匹配数据')
                 continue
-
-            # 选最佳
             best = _pick_best_granule(granules, target_time)
             if best is None:
                 errors.append(f'{product}: 无法确定最佳 granule')
                 continue
-
-            # 下载
             hdf_path = _download_hdf(
                 best['download_url'], temp_dir,
                 username=username, password=password,
             )
-
-            # 提取
             wv = _extract_water_vapor(hdf_path, corners)
             if wv is not None:
-                source = (
-                    f'{product} ({os.path.basename(best["download_url"])})'
-                )
-                return wv, source
+                return wv, f'{product} ({os.path.basename(best["download_url"])})'
             else:
-                errors.append(
-                    f'{product}: 研究区无有效水汽像元（云覆盖/超出条带）'
-                )
-
+                errors.append(f'{product}: 研究区无有效水汽像元（云覆盖/超出条带）')
         except requests.RequestException as e:
             errors.append(f'{product}: 网络错误 — {e}')
+        except RuntimeError as e:
+            errors.append(f'{product}: {e}')
         except Exception as e:
             errors.append(f'{product}: {e}')
-        finally:
-            # 仅在使用临时目录时清理
-            if not cache_dir:
-                _cleanup_temp_dir(temp_dir, keep_dir=True)
 
-    # 回退：扩大时间窗口
     if time_window_hours < 3.0:
-        if not cache_dir:
-            _cleanup_temp_dir(temp_dir, keep_dir=False)
         try:
             return fetch_water_vapor(
                 acquisition_datetime, corners,
                 username=username, password=password,
-                time_window_hours=3.0,
-                cache_dir=cache_dir,
+                time_window_hours=3.0, cache_dir=cache_dir,
             )
         except MODISWaterVaporError:
             pass
 
     if not cache_dir:
-        _cleanup_temp_dir(temp_dir, keep_dir=False)
+        for f in os.listdir(temp_dir):
+            os.unlink(os.path.join(temp_dir, f))
+        os.rmdir(temp_dir)
     raise MODISWaterVaporError(
         '未能获取有效水汽含量:\n' + '\n'.join(f'  • {e}' for e in errors)
     )
@@ -562,20 +521,8 @@ def fetch_water_vapor(
 def _corners_to_bbox(
     corners: dict[str, tuple[float, float]],
 ) -> Optional[tuple[float, float, float, float]]:
-    """从四至角坐标构建 (lon_min, lat_min, lon_max, lat_max)。"""
     lats = [corners[c][0] for c in corners if corners[c] is not None]
     lons = [corners[c][1] for c in corners if corners[c] is not None]
     if not lats or not lons:
         return None
     return (min(lons), min(lats), max(lons), max(lats))
-
-
-def _cleanup_temp_dir(temp_dir: str, keep_dir: bool = False):
-    """清理临时目录。"""
-    try:
-        for f in os.listdir(temp_dir):
-            os.unlink(os.path.join(temp_dir, f))
-        if not keep_dir:
-            os.rmdir(temp_dir)
-    except Exception:
-        pass
