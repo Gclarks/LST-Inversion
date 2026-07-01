@@ -19,6 +19,8 @@ from .lst_inversion import (
 )
 from .water_vapor import (
     fetch_water_vapor,
+    extract_wv_arrays,
+    resample_wv_to_landsat,
     save_earthdata_credentials,
     MODISWaterVaporError,
     _check_netrc_has_earthdata,

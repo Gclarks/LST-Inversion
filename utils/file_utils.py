@@ -103,6 +103,7 @@ TEMP_FILES = {
     'ndvi':            'ndvi.tif',
     'emissivity':      'emissivity.tif',
     'modis_hdf':       'modis_wv.hdf',            # MODIS 水汽 HDF
+    'wv_raster':       'wv_raster.tif',            # 逐像元水汽栅格
     'inversion_log':   'inversion_log.txt',        # 处理日志
 }
 

@@ -60,6 +60,7 @@ class InversionWorker(threading.Thread):
         self.output_filename = output_filename
         self.output_unit = output_unit
 
+        self.wv_raster_path: str = ''
         self.cache_dir: str = ''
 
     def _check_cancel(self):
@@ -193,17 +194,25 @@ class InversionWorker(threading.Thread):
         log('地表比辐射率估算完成')
 
         # ── 6. LST 反演 ──
-        advance(4, f'正在反演地表温度 (w={self.water_vapor} g/cm²)...')
+        # 确定水汽输入（逐像元栅格优先于标量）
+        wv_input = self.wv_raster_path if (self.wv_raster_path and os.path.isfile(self.wv_raster_path)) else self.water_vapor
+        if isinstance(wv_input, str):
+            wv_mean = self.water_vapor  # displayed in log
+            advance(4, f'正在反演地表温度 (逐像元 wv 模式)...')
+        else:
+            wv_mean = wv_input
+            advance(4, f'正在反演地表温度 (w={wv_input} g/cm²)...')
+
         self._check_cancel()
 
-        coeff_info = get_coefficient_info(self.water_vapor)
+        coeff_info = get_coefficient_info(wv_mean if wv_mean else 2.0)
         log(f'水汽区间: {coeff_info["interval"]}')
 
         lst_out = os.path.join(self.output_dir, self.output_filename)
         unit_label = 'K' if self.output_unit == 'K' else '°C'
         invert_lst(
             toa_b10, emis_path,
-            water_vapor=self.water_vapor,
+            water_vapor=wv_input,
             output_path=lst_out,
             output_unit=self.output_unit,
         )

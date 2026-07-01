@@ -42,6 +42,7 @@ class MainWindow(tk.Tk):
         self._cancel_event: threading.Event = threading.Event()
         self._processing = False
         self._metadata: LandsatMetadata | None = None
+        self._wv_raster_path: str = ''
 
         self._build_ui()
 
@@ -265,13 +266,37 @@ class MainWindow(tk.Tk):
                     })
                     return
 
-                from utils.file_utils import create_run_cache_dir
+                from utils.file_utils import create_run_cache_dir, get_cache_path
+                from core.water_vapor import extract_wv_arrays, resample_wv_to_landsat
+                import tempfile, shutil
                 cache_dir = create_run_cache_dir()
+
+                # Step 1: 下载 MODIS
                 wv, source = fetch_water_vapor(
                     acquisition_datetime=acq_dt,
                     corners=corners,
                     cache_dir=cache_dir,
                 )
+
+                # Step 2: 提取数组并重采样到 Landsat 网格
+                hdf_files = [f for f in os.listdir(cache_dir) if f.endswith('.hdf')]
+                wv_raster_path = ''
+                if hdf_files:
+                    hdf_path = os.path.join(cache_dir, hdf_files[0])
+                    try:
+                        arrays = extract_wv_arrays(hdf_path, corners)
+                        wv_raster_path = get_cache_path(cache_dir, 'wv_raster')
+                        # 用 Band 10 作为参考网格
+                        scan = validate_input_directory(self._input_var.get().strip())
+                        band10_path = scan['bands'].get(10, '')
+                        if band10_path:
+                            resample_wv_to_landsat(
+                                arrays['wv'], arrays['lat'], arrays['lon'],
+                                arrays['qa'], band10_path, wv_raster_path,
+                            )
+                            self._wv_raster_path = wv_raster_path
+                    except Exception:
+                        pass  # 重采样失败，回退到标量模式
                 self._wv_queue.put({
                     'type': 'wv_done',
                     'water_vapor': wv,
@@ -386,7 +411,7 @@ class MainWindow(tk.Tk):
         # 启动后台线程
         self._cancel_event.clear()
         self._queue = queue.Queue()
-        self._worker = InversionWorker(
+        worker = InversionWorker(
             input_dir=input_dir,
             output_dir=output_dir,
             output_filename=filename,
@@ -395,6 +420,8 @@ class MainWindow(tk.Tk):
             progress_queue=self._queue,
             cancel_event=self._cancel_event,
         )
+        worker.wv_raster_path = self._wv_raster_path
+        self._worker = worker
         self._worker.start()
         self._poll_queue()
 

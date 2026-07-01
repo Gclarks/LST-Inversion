@@ -104,7 +104,7 @@ def planck_inverse(bt: np.ndarray) -> np.ndarray:
 def invert_lst(
     radiance_path: str,
     emissivity_path: str,
-    water_vapor: float,
+    water_vapor: float | str,
     output_path: str,
     output_unit: str = KELVIN,
 ) -> str:
@@ -113,21 +113,29 @@ def invert_lst(
     Args:
         radiance_path:  Band 10 TOA Radiance GeoTIFF。
         emissivity_path: 地表比辐射率 ε GeoTIFF。
-        water_vapor:    大气水汽含量 w (g/cm²)。
+        water_vapor:    水汽含量 w (g/cm²)，标量或 GeoTIFF 路径（逐像元）。
         output_path:    输出 LST GeoTIFF 路径。
-        output_unit:    温度单位：'K' (Kelvin，默认) 或 'C' (Celsius)。
-
-    Returns:
-        output_path。
+        output_unit:    温度单位：'K' / 'C'。
     """
-    # 系数选择
-    coeffs = _select_coefficients(water_vapor)
+    # 判断水汽输入类型
+    wv_is_raster = isinstance(water_vapor, str)
+    wv_ds = None
+
+    if wv_is_raster:
+        wv_ds = gdal.Open(water_vapor, gdal.GA_ReadOnly)
+        if wv_ds is None:
+            raise RuntimeError(f"无法打开水汽栅格: {water_vapor}")
+        # 用全域均值选系数
+        wv_mean = float(np.nanmean(wv_ds.ReadAsArray()))
+        coeffs = _select_coefficients(wv_mean)
+    else:
+        coeffs = _select_coefficients(water_vapor)
 
     # 打开输入
     rad_ds = gdal.Open(radiance_path, gdal.GA_ReadOnly)
     emis_ds = gdal.Open(emissivity_path, gdal.GA_ReadOnly)
     if rad_ds is None or emis_ds is None:
-        raise RuntimeError(f"无法打开文件: {radiance_path} / {emissivity_path}")
+        raise RuntimeError(f"无法打开: {radiance_path} / {emissivity_path}")
 
     # 创建输出
     driver = gdal.GetDriverByName('GTiff')
@@ -156,12 +164,17 @@ def invert_lst(
             l_sen = rb.ReadAsArray(x, y, cols, rows).astype(np.float32)
             emis = eb.ReadAsArray(x, y, cols, rows).astype(np.float32)
 
+            # 水汽：标量或逐像元
+            if wv_ds is not None:
+                wv_block = wv_ds.ReadAsArray(x, y, cols, rows).astype(np.float32)
+            else:
+                wv_block = water_vapor
+
             # 公式(1)
-            bt = calc_bt(l_sen, emis, water_vapor, coeffs)
+            bt = calc_bt(l_sen, emis, wv_block, coeffs)
             # 公式(2)
             ts = planck_inverse(bt)
 
-            # 单位转换
             if output_unit == CELSIUS:
                 ts -= 273.15
 
@@ -169,7 +182,7 @@ def invert_lst(
 
     out_band.SetNoDataValue(OUTPUT_NODATA)
     out_band.FlushCache()
-    rad_ds, emis_ds, out_ds = None, None, None
+    rad_ds, emis_ds, wv_ds, out_ds = None, None, None, None
     return output_path
 
 

@@ -552,6 +552,108 @@ def _compute_mean_wv(wv, lat, lon, qa, corners) -> Optional[float]:
     return float(np.mean(wv[mask]))
 
 
+# ── 水汽栅格重采样 ──────────────────────────────────────────
+
+def extract_wv_arrays(
+    hdf_path: str,
+    corners: dict[str, tuple[float, float]],
+) -> dict:
+    """从 MODIS HDF 提取水汽、经纬度、QA 的原始数组。
+
+    Returns:
+        {'wv': np.ndarray, 'lat': np.ndarray, 'lon': np.ndarray, 'qa': np.ndarray|None}
+    """
+    for reader in (_read_hdf4, _read_hdf5, _read_gdal):
+        try:
+            data = reader(hdf_path)
+            if data is not None:
+                return {'wv': data[0], 'lat': data[1],
+                        'lon': data[2], 'qa': data[3]}
+        except Exception:
+            continue
+    raise RuntimeError('无法从 HDF 中提取水汽数据')
+
+
+def resample_wv_to_landsat(
+    wv: np.ndarray,
+    lat: np.ndarray,
+    lon: np.ndarray,
+    qa,
+    landsat_reference_path: str,
+    output_path: str,
+) -> Optional[str]:
+    """将 MODIS 水汽数据重采样到 Landsat 像元网格。
+
+    使用 KD-tree 最近邻查询。QA 不合格的 MODIS 像元不参与插值。
+
+    Args:
+        wv, lat, lon, qa: 来自 extract_wv_arrays() 的数组。
+        landsat_reference_path: Landsat Band 10 GeoTIFF，用于确定目标网格。
+        output_path: 输出水汽栅格 GeoTIFF。
+
+    Returns:
+        output_path，如果研究区无有效像元则返回 None。
+    """
+    from scipy.spatial import cKDTree
+    from osgeo import gdal, osr
+
+    # QA 过滤
+    if qa is not None and qa.shape == wv.shape:
+        valid = (wv > -9999) & (wv > 0) & np.isfinite(wv) & (qa >= 0) & (qa <= 1)
+    else:
+        valid = (wv > -9999) & (wv > 0) & np.isfinite(wv)
+
+    if np.sum(valid) < 10:
+        return None
+
+    # 构建 KD-tree
+    coords = np.column_stack([lat[valid].ravel(), lon[valid].ravel()])
+    values = wv[valid].ravel()
+    tree = cKDTree(coords)
+
+    # Landsat 参考网格
+    ref_ds = gdal.Open(landsat_reference_path, gdal.GA_ReadOnly)
+    geo = ref_ds.GetGeoTransform()
+    cols, rows = ref_ds.RasterXSize, ref_ds.RasterYSize
+    proj = ref_ds.GetProjection()
+    ref_ds = None
+
+    # 构建 Landsat 像元中心坐标 (lon, lat)
+    xs = geo[0] + geo[1] * (np.arange(cols) + 0.5)
+    ys = geo[3] + geo[5] * (np.arange(rows) + 0.5)
+    xx, yy = np.meshgrid(xs, ys)
+
+    # 投影坐标 → 经纬度
+    src_srs = osr.SpatialReference()
+    src_srs.ImportFromWkt(proj)
+    tgt_srs = osr.SpatialReference()
+    tgt_srs.ImportFromEPSG(4326)
+    transform = osr.CoordinateTransformation(src_srs, tgt_srs)
+
+    lons = np.zeros_like(xx)
+    lats = np.zeros_like(yy)
+    for r in range(rows):
+        for c in range(cols):
+            pt = transform.TransformPoint(xx[r, c], yy[r, c])
+            lats[r, c] = pt[1]
+            lons[r, c] = pt[0]
+
+    # KD-tree 查询最近邻
+    query = np.column_stack([lats.ravel(), lons.ravel()])
+    _, idx = tree.query(query)
+    wv_grid = values[idx].reshape(rows, cols)
+
+    # 写入 GeoTIFF
+    driver = gdal.GetDriverByName('GTiff')
+    out_ds = driver.Create(output_path, cols, rows, 1, gdal.GDT_Float32)
+    out_ds.SetGeoTransform(geo)
+    out_ds.SetProjection(proj)
+    out_ds.GetRasterBand(1).WriteArray(wv_grid)
+    out_ds.GetRasterBand(1).SetNoDataValue(np.nan)
+    out_ds = None
+    return output_path
+
+
 # ── 公开接口 ─────────────────────────────────────────────────
 
 class MODISWaterVaporError(Exception):
